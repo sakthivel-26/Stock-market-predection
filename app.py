@@ -373,6 +373,11 @@ def calculate_confidence_gauge(confidence):
         return 0
     return round(confidence * 100)
 
+
+def format_crore(value):
+    """Format a numeric value in crore notation for UI display."""
+    return f"{value / 10000000:.2f} Cr"
+
 def train_model_func():
     """
     Train ML model using historical stock data.
@@ -612,6 +617,85 @@ def get_nse_top_movers():
                     "change_pct": round(float(row.get("perChange", row.get("net_price", 0))), 2),
                 })
         return result
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300)
+def get_bse_market_snapshot():
+    """Fetch a BSE snapshot using SENSEX and the tracked BSE stock list."""
+    try:
+        tracked_symbols = list(BSE_STOCKS.values())
+        download_symbols = tracked_symbols + ["^BSESN"]
+        data = yf.download(
+            download_symbols,
+            period="5d",
+            group_by="ticker",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+        if data is None or data.empty:
+            return None
+
+        def get_close_series(ticker):
+            if isinstance(data.columns, pd.MultiIndex):
+                if ticker not in data.columns.get_level_values(0):
+                    return None
+                ticker_frame = data[ticker]
+                if "Close" not in ticker_frame:
+                    return None
+                series = pd.to_numeric(ticker_frame["Close"], errors="coerce").dropna()
+            else:
+                if ticker != "^BSESN" or "Close" not in data.columns:
+                    return None
+                series = pd.to_numeric(data["Close"], errors="coerce").dropna()
+            return series if len(series) >= 2 else None
+
+        sensex_series = get_close_series("^BSESN")
+        if sensex_series is None:
+            return None
+
+        sensex_last = float(sensex_series.iloc[-1])
+        sensex_prev = float(sensex_series.iloc[-2])
+        sensex_change_pct = ((sensex_last - sensex_prev) / sensex_prev) * 100 if sensex_prev else 0
+
+        movers = []
+        for name, ticker in BSE_STOCKS.items():
+            close_series = get_close_series(ticker)
+            if close_series is None:
+                continue
+
+            latest = float(close_series.iloc[-1])
+            previous = float(close_series.iloc[-2])
+            change_pct = ((latest - previous) / previous) * 100 if previous else 0
+            movers.append({
+                "name": name,
+                "symbol": ticker.replace(".BO", ""),
+                "ltp": round(latest, 2),
+                "change_pct": round(change_pct, 2),
+            })
+
+        if not movers:
+            return None
+
+        gainers = sorted(movers, key=lambda item: item["change_pct"], reverse=True)
+        losers = sorted(movers, key=lambda item: item["change_pct"])
+        advances = sum(1 for item in movers if item["change_pct"] > 0)
+        declines = sum(1 for item in movers if item["change_pct"] < 0)
+        unchanged = len(movers) - advances - declines
+        ad_ratio = round(advances / max(declines, 1), 2)
+
+        return {
+            "sensex_last": round(sensex_last, 2),
+            "sensex_change_pct": round(sensex_change_pct, 2),
+            "advances": advances,
+            "declines": declines,
+            "unchanged": unchanged,
+            "ad_ratio": ad_ratio,
+            "gainers": gainers[:10],
+            "losers": losers[:10],
+        }
     except Exception:
         return None
 
@@ -1606,7 +1690,7 @@ elif page == "Swing Trading Alerts":
                         oi = nse.get("participant_oi", {})
                         fii_oi = oi.get("FII")
                         if fii_oi:
-                            nc4.metric("FII Net OI", f"{fii_oi['net']:,}", "Long" if fii_oi["net"] > 0 else "Short")
+                            nc4.metric("FII Net OI", format_crore(fii_oi["net"]), "Long" if fii_oi["net"] > 0 else "Short")
 
                     # Trade plan
                     st.markdown("**📋 Swing Trade Plan:**")
@@ -1703,20 +1787,62 @@ elif page == "Market Summary":
         with dash3:
             fii_oi = oi_data.get("FII")
             if fii_oi:
-                st.metric("FII Net OI", f"{fii_oi['net']:,}", "Long" if fii_oi["net"] > 0 else "Short")
+                st.metric("FII Net OI", format_crore(fii_oi["net"]), "Long" if fii_oi["net"] > 0 else "Short")
             dii_oi = oi_data.get("DII")
             if dii_oi:
-                st.metric("DII Net OI", f"{dii_oi['net']:,}", "Long" if dii_oi["net"] > 0 else "Short")
+                st.metric("DII Net OI", format_crore(dii_oi["net"]), "Long" if dii_oi["net"] > 0 else "Short")
+
+    st.divider()
+
+    st.subheader("🏛️ BSE Snapshot")
+    bse_snapshot = get_bse_market_snapshot()
+    if bse_snapshot:
+        bse_col1, bse_col2, bse_col3 = st.columns(3)
+        with bse_col1:
+            st.metric("SENSEX", f"₹{bse_snapshot['sensex_last']:,.0f}", f"{bse_snapshot['sensex_change_pct']:+.2f}%")
+            st.metric("Advance/Decline", bse_snapshot["ad_ratio"], f"{bse_snapshot['advances']}A / {bse_snapshot['declines']}D / {bse_snapshot['unchanged']}U")
+        with bse_col2:
+            top_bse_gainer = bse_snapshot["gainers"][0] if bse_snapshot["gainers"] else None
+            if top_bse_gainer:
+                st.metric("Top BSE Gainer", top_bse_gainer["name"], f"{top_bse_gainer['change_pct']:+.2f}%")
+                st.caption(f"₹{top_bse_gainer['ltp']}")
+        with bse_col3:
+            top_bse_loser = bse_snapshot["losers"][0] if bse_snapshot["losers"] else None
+            if top_bse_loser:
+                st.metric("Top BSE Loser", top_bse_loser["name"], f"{top_bse_loser['change_pct']:+.2f}%")
+                st.caption(f"₹{top_bse_loser['ltp']}")
+
+        bse_list_col1, bse_list_col2 = st.columns(2)
+        with bse_list_col1:
+            st.subheader("🟢 Top Gainers (BSE Tracked)")
+            for item in bse_snapshot["gainers"]:
+                st.write(f"• **{item['name']}** — ₹{item['ltp']}  ({item['change_pct']:+.2f}%)")
+        with bse_list_col2:
+            st.subheader("🔴 Top Losers (BSE Tracked)")
+            for item in bse_snapshot["losers"]:
+                st.write(f"• **{item['name']}** — ₹{item['ltp']}  ({item['change_pct']:+.2f}%)")
+    else:
+        st.info("BSE snapshot is unavailable right now.")
 
     # Participant OI Breakdown
     if oi_data:
         st.divider()
         st.subheader("🏦 Participant-wise Open Interest")
+        st.caption(
+            "Bullish Positions means traders are expecting the market to move up. "
+            "Bearish Positions means they are expecting it to move down. "
+            "Net Bias is Bullish Positions minus Bearish Positions."
+        )
         oi_rows = []
         for ct in ["FII", "DII", "Client", "Pro"]:
             d = oi_data.get(ct)
             if d:
-                oi_rows.append({"Participant": ct, "Long": f"{d['long']:,}", "Short": f"{d['short']:,}", "Net": f"{d['net']:,}"})
+                oi_rows.append({
+                    "Participant": ct,
+                    "Bullish Positions": format_crore(d['long']),
+                    "Bearish Positions": format_crore(d['short']),
+                    "Net Bias": format_crore(d['net']),
+                })
         if oi_rows:
             st.table(pd.DataFrame(oi_rows))
 
