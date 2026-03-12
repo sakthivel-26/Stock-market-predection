@@ -108,6 +108,39 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+st.markdown(
+    """
+    <style>
+    .shakthi-powered-badge {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 9999;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(12, 17, 28, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: #f5f7fb;
+        font-size: 13px;
+        font-weight: 600;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        backdrop-filter: blur(10px);
+    }
+
+    @media (max-width: 640px) {
+        .shakthi-powered-badge {
+            right: 12px;
+            bottom: 12px;
+            font-size: 12px;
+            padding: 8px 12px;
+        }
+    }
+    </style>
+    <div class="shakthi-powered-badge">Powered by S H A K T H I ❤️</div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("🤖 AI Stock Analyzer")
 
 # ========================
@@ -302,10 +335,14 @@ def get_ai_explanation(recommendation, pro_score, rsi_val, ma20_val, ma50_val, c
     return f"AI {strength}suggests {action} (score {pro_score:+d}/10) because {reason_str}."
 
 
-def tradingview_mini_chart(symbol_nse, height=220):
-    """Render a TradingView mini chart widget for an NSE stock."""
-    # Convert "RELIANCE.NS" -> "NSE:RELIANCE"
-    tv_symbol = "NSE:" + symbol_nse.upper().replace(".NS", "")
+def tradingview_mini_chart(symbol, height=220):
+    """Render a TradingView mini chart widget for an NSE or BSE stock."""
+    symbol = symbol.upper()
+    if symbol.endswith(".BO"):
+        tv_symbol = "BSE:" + symbol.replace(".BO", "")
+    else:
+        tv_symbol = "NSE:" + symbol.replace(".NS", "")
+
     html = f"""
     <div class="tradingview-widget-container" style="width:100%;height:{height}px;">
       <div class="tradingview-widget-container__widget" style="width:100%;height:100%;"></div>
@@ -1421,6 +1458,9 @@ if page == "Single Stock Analysis":
             st.divider()
             st.info(f"🤖 {result['ai_explanation']}")
 
+            st.subheader("📺 TradingView Chart")
+            tradingview_mini_chart(result["stock"], height=320)
+
             # ── Price + BB + MA chart ──────────────────────────────────
             st.subheader("📈 Price Chart with Bollinger Bands & Moving Averages")
             fig = go.Figure()
@@ -1853,7 +1893,7 @@ elif page == "Email Alerts":
                             )
                         lines.append("")
 
-                    lines.append("_Sent by AI Stock Analyzer ❤️_")
+                    lines.append("_Powered by S H A K T H I ❤️_")
                     tg_message = "\n".join(lines)
 
                     # Send via Telegram Bot API (auto chat ID)
