@@ -1,0 +1,16 @@
+streamlit
+fastapi
+uvicorn
+yfinance
+pandas
+numpy
+ta
+joblib
+requests
+beautifulsoup4
+plotly
+scikit-learn
+nselib
+python-multipart
+httpx
+python-dotenv

@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+auto_alert.log
+cloud_alert.log
+credentials.json
+.env
