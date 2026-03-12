@@ -72,20 +72,32 @@ GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
 GMAIL_SENDER = os.getenv("GMAIL_SENDER")
 
 def get_telegram_chat_id(bot_token):
+    if not bot_token:
+        return None
 
     try:
         url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
         response = requests.get(url, timeout=10)
+        response.raise_for_status()
         data = response.json()
 
         if data.get("ok") and data.get("result"):
             return data["result"][-1]["message"]["chat"]["id"]
 
-    except:
-        pass
+    except requests.RequestException:
+        return None
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
 
     return None
-TELEGRAM_CHAT_ID = get_telegram_chat_id(TELEGRAM_BOT_TOKEN)
+
+
+def resolve_telegram_chat_id(bot_token):
+    if TELEGRAM_CHAT_ID:
+        return TELEGRAM_CHAT_ID
+    return get_telegram_chat_id(bot_token)
+
+
 # ========================
 # PAGE CONFIG
 # ========================
@@ -1845,10 +1857,10 @@ elif page == "Email Alerts":
                     tg_message = "\n".join(lines)
 
                     # Send via Telegram Bot API (auto chat ID)
-                    chat_id = get_telegram_chat_id(TELEGRAM_BOT_TOKEN)
+                    chat_id = resolve_telegram_chat_id(TELEGRAM_BOT_TOKEN)
 
                     if not chat_id:
-                        st.error("❌ No chat ID found. Send a message to your Telegram bot first (e.g. 'hello').")
+                        st.error("❌ No chat ID found. Add TELEGRAM_CHAT_ID to .env or send a message to your Telegram bot first (e.g. 'hello').")
                     else:
                         try:
                             tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -1858,6 +1870,7 @@ elif page == "Email Alerts":
                                 "parse_mode": "Markdown",
                             }
                             tg_resp = requests.post(tg_url, json=tg_payload, timeout=15)
+                            tg_resp.raise_for_status()
                             tg_result = tg_resp.json()
 
                             if tg_result.get("ok"):
@@ -1866,8 +1879,13 @@ elif page == "Email Alerts":
                             else:
                                 err_desc = tg_result.get("description", "Unknown error")
                                 st.error(f"❌ Telegram API error: {err_desc}")
-                        except requests.exceptions.ConnectionError:
-                            st.error("❌ Could not connect to Telegram. Check your internet connection.")
+                        except requests.exceptions.HTTPError as e:
+                            response_text = e.response.text if e.response is not None else str(e)
+                            st.error(f"❌ Telegram request failed: {response_text}")
+                        except requests.exceptions.ConnectionError as e:
+                            st.error(f"❌ Could not connect to Telegram: {e}")
+                        except requests.exceptions.Timeout:
+                            st.error("❌ Telegram request timed out. Check your network or try again.")
                         except Exception as e:
                             st.error(f"❌ Telegram send failed: {e}")
 
