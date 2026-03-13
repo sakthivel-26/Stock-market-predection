@@ -21,6 +21,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import time
+from streamlit_pwa import pwa
 
 
 from dotenv import load_dotenv
@@ -111,27 +112,16 @@ st.set_page_config(
 )
 
 
-def setup_pwa():
-    """Inject minimal PWA metadata and service worker registration."""
-    st.markdown(
-        """
-        <link rel="manifest" href="/manifest.json">
-        <meta name="theme-color" content="#0c111c">
-        <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function() {
-                navigator.serviceWorker.register('/service-worker.js').catch(function() {});
-            });
-        }
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
-def main():
-    """Main bootstrap for app-level startup hooks (e.g., PWA)."""
-    setup_pwa()
+pwa(
+    name="AI Stock Analyzer",
+    short_name="StockAI",
+    description="AI powered stock market analyzer",
+    theme_color="#0c111c",
+    background_color="#0c111c",
+    icon="https://cdn-icons-png.flaticon.com/512/2721/2721265.png"
+)
 
 
 main()
