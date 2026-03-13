@@ -12,6 +12,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from nselib import capital_market, derivatives
 import base64
 from email.mime.text import MIMEText
@@ -107,6 +109,32 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+
+def setup_pwa():
+    """Inject minimal PWA metadata and service worker registration."""
+    st.markdown(
+        """
+        <link rel="manifest" href="/manifest.json">
+        <meta name="theme-color" content="#0c111c">
+        <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function() {
+                navigator.serviceWorker.register('/service-worker.js').catch(function() {});
+            });
+        }
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def main():
+    """Main bootstrap for app-level startup hooks (e.g., PWA)."""
+    setup_pwa()
+
+
+main()
 
 st.markdown(
     """
@@ -246,29 +274,31 @@ BSE_STOCKS = {
 GAINERS = ["RELIANCE.NS", "ICICIBANK.NS", "LT.NS", "BHARTIARTL.NS", "ITC.NS"]
 LOSERS = ["TCS.NS", "INFY.NS", "WIPRO.NS", "TATASTEEL.NS", "HINDALCO.NS"]
 
+# Yahoo tickers occasionally change; keep aliases for resilient downloads.
+SYMBOL_ALIASES = {
+    "ZOMATO.NS": ["ETERNAL.NS"],
+}
+
 # ========================
 # LOAD MODEL
 # ========================
 @st.cache_resource
-def load_model():
+def load_model(model_path, model_mtime):
     """Load pre-trained model"""
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.exists(model_path):
         return None
     try:
-        m = joblib.load(MODEL_PATH)
-        # Verify model expects 6 features
-        if hasattr(m, 'n_features_in_') and m.n_features_in_ != 6:
-            os.remove(MODEL_PATH)
+        m = joblib.load(model_path)
+        # Verify model matches the current training feature set.
+        expected_features = 10
+        if hasattr(m, 'n_features_in_') and m.n_features_in_ != expected_features:
             return None
         return m
     except Exception:
         return None
 
-model = load_model()
-if model is None and os.path.exists(MODEL_PATH):
-    os.remove(MODEL_PATH)
-    load_model.clear()
-    model = None
+model_mtime = os.path.getmtime(MODEL_PATH) if os.path.exists(MODEL_PATH) else 0
+model = load_model(MODEL_PATH, model_mtime)
 
 # ========================
 # HELPER FUNCTIONS
@@ -404,22 +434,38 @@ def train_model_func():
                 continue
 
             # Technical Indicators
-            data["MA20"] = data["Close"].rolling(20).mean()
-            data["MA50"] = data["Close"].rolling(50).mean()
+            close  = data["Close"].squeeze()
+            high   = data["High"].squeeze()
+            low    = data["Low"].squeeze()
+            volume = data["Volume"].squeeze()
 
-            rsi = ta.momentum.RSIIndicator(
-                close=data["Close"].squeeze(),
-                window=14
-            )
+            data["MA20"] = close.rolling(20).mean()
+            data["MA50"] = close.rolling(50).mean()
 
-            data["RSI"] = rsi.rsi()
+            data["RSI"] = ta.momentum.RSIIndicator(close=close, window=14).rsi()
 
-            data["Volume_Avg20"] = data["Volume"].rolling(20).mean()
+            data["MACD_Hist"] = ta.trend.MACD(close=close).macd_diff()
 
-            data["Return"] = data["Close"].pct_change()
+            bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
+            bb_range = bb.bollinger_hband() - bb.bollinger_lband()
+            data["BB_pband"] = (close - bb.bollinger_lband()) / bb_range.replace(0, np.nan)
 
-            # Target variable
-            data["Target"] = (data["Close"].shift(-1) > data["Close"]).astype(int)
+            data["ATR_ratio"] = ta.volatility.AverageTrueRange(
+                high=high, low=low, close=close, window=14
+            ).average_true_range() / close.replace(0, np.nan)
+
+            data["Volume_Avg20"] = volume.rolling(20).mean()
+            data["Volume_ratio"] = volume / data["Volume_Avg20"].replace(0, np.nan)
+
+            data["Return"]    = close.pct_change()
+            data["Return_5d"] = close.pct_change(5)
+
+            obv = ta.volume.OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+            obv_ma10 = obv.rolling(10).mean()
+            data["OBV_ratio"] = obv / obv_ma10.abs().replace(0, np.nan)
+
+            # Target: 5-day forward direction (less noise than next-day)
+            data["Target"] = (close.shift(-5) > close).astype(int)
 
             data = data.dropna()
 
@@ -443,30 +489,92 @@ def train_model_func():
     dataset = pd.concat(all_data, ignore_index=True)
 
     # Features used by model
-    features_df = dataset[
-        ["MA20", "MA50", "RSI", "Volume", "Volume_Avg20", "Return"]
+    FEATURE_COLS = [
+        "MA20", "MA50", "RSI", "MACD_Hist",
+        "BB_pband", "ATR_ratio", "Volume_ratio",
+        "Return", "Return_5d", "OBV_ratio"
     ]
+    features_df = dataset[FEATURE_COLS]
+
+    # Keep only finite rows to avoid unstable training behavior.
+    features_df = features_df.replace([np.inf, -np.inf], np.nan).dropna()
+    target_series = dataset.loc[features_df.index, "Target"]
 
     features = features_df.values
-    target = dataset["Target"].values
+    target = target_series.values
+
+    if len(features) < 200:
+        st.error("❌ Not enough clean training rows after preprocessing.")
+        return None
 
     status_text.text("Training RandomForest model...")
 
+    X_train, X_val, y_train, y_val = train_test_split(
+        features,
+        target,
+        test_size=0.2,
+        random_state=42,
+        stratify=target,
+    )
+
     model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=10,
+        n_estimators=600,
+        max_depth=12,
+        min_samples_leaf=4,
+        max_features="sqrt",
+        class_weight="balanced_subsample",
         random_state=42,
         n_jobs=-1
     )
 
-    model.fit(features, target)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_val)
+    acc = accuracy_score(y_val, y_pred)
+    prec = precision_score(y_val, y_pred, zero_division=0)
+    rec = recall_score(y_val, y_pred, zero_division=0)
+    f1 = f1_score(y_val, y_pred, zero_division=0)
 
     joblib.dump(model, MODEL_PATH)
 
     status_text.text("Model trained successfully! ✅")
+    st.caption(
+        f"Validation Metrics → Accuracy: {acc:.2%} | Precision: {prec:.2%} | Recall: {rec:.2%} | F1: {f1:.2%}"
+    )
     progress_bar.progress(1.0)
 
-    return model
+    return {
+        "model": model,
+        "metrics": {
+            "accuracy": acc,
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+        },
+    }
+
+
+def auto_train_model_if_missing():
+    """Train model automatically once per session if no model is loaded."""
+    if st.session_state.get("auto_train_attempted", False):
+        return
+
+    if model is not None:
+        return
+
+    st.session_state["auto_train_attempted"] = True
+    with st.spinner("No model found. Training automatically..."):
+        try:
+            result = train_model_func()
+            if result is not None and result.get("model") is not None:
+                st.session_state["last_train_metrics"] = result.get("metrics", {})
+                st.session_state["train_success"] = True
+                load_model.clear()
+                st.rerun()
+            else:
+                st.warning("⚠️ Auto-training could not complete. Use Train & Load Model to retry.")
+        except Exception as e:
+            st.warning(f"⚠️ Auto-training failed: {e}")
 
 # ========================
 # NSE INDIA DATA HELPERS
@@ -1144,19 +1252,42 @@ def safe_download(symbol, period="5y"):
     Safe wrapper around yfinance download.
     Prevents crashes if Yahoo fails or returns empty data.
     """
-    try:
-        data = yf.download(symbol, period=period, progress=False, threads=False)
+    base_symbol = symbol.upper()
+    symbols_to_try = [base_symbol] + SYMBOL_ALIASES.get(base_symbol, [])
 
-        if data is None or data.empty:
-            return None
+    # For training, fall back to shorter history if 5y is unavailable for newer listings.
+    periods_to_try = [period]
+    if period == "5y":
+        periods_to_try.extend(["2y", "1y"])
 
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
+    for sym in symbols_to_try:
+        for use_period in periods_to_try:
+            for attempt in range(3):
+                try:
+                    data = yf.download(
+                        sym,
+                        period=use_period,
+                        progress=False,
+                        threads=False,
+                        auto_adjust=False,
+                    )
 
-        return data
+                    if data is None or data.empty:
+                        # Secondary fallback path for transient Yahoo responses.
+                        data = yf.Ticker(sym).history(period=use_period, auto_adjust=False)
 
-    except Exception:
-        return None
+                    if data is None or data.empty:
+                        time.sleep(0.6 * (attempt + 1))
+                        continue
+
+                    if isinstance(data.columns, pd.MultiIndex):
+                        data.columns = data.columns.droplevel(1)
+
+                    return data
+                except Exception:
+                    time.sleep(0.6 * (attempt + 1))
+
+    return None
 def analyze_stock_data(symbol, period="3mo"):
     """Analyze a single stock"""
     try:
@@ -1251,13 +1382,28 @@ def analyze_stock_data(symbol, period="3mo"):
             pro_score += 2
 
         # 1. ML model base signal
+        bb_range_val = float(bb_upper - bb_lower)
+        bb_pband_val = (current_price - float(bb_lower)) / bb_range_val if bb_range_val > 0 else 0.5
+        atr_ratio_val = atr_val / current_price if current_price > 0 else 0.0
+        vol_ratio_val = vol_cur / vol_avg20 if vol_avg20 > 0 else 1.0
+        return_5d_val = float(data["Close"].pct_change(5).iloc[-1])
+        obv_series = data["OBV"] if "OBV" in data.columns else ta.volume.OnBalanceVolumeIndicator(
+            close=data["Close"].squeeze(), volume=data["Volume"].squeeze()
+        ).on_balance_volume()
+        obv_ma10_val = float(obv_series.rolling(10).mean().iloc[-1])
+        obv_ratio_val = float(obv_series.iloc[-1]) / abs(obv_ma10_val) if abs(obv_ma10_val) > 0 else 1.0
+
         features_df = pd.DataFrame([{
             "MA20":         ma20_val,
             "MA50":         ma50_val,
             "RSI":          rsi_val,
-            "Volume":       vol_cur,
-            "Volume_Avg20": vol_avg20,
-            "Return":       float(latest["Return"])
+            "MACD_Hist":    macd_hist,
+            "BB_pband":     bb_pband_val,
+            "ATR_ratio":    atr_ratio_val,
+            "Volume_ratio": vol_ratio_val,
+            "Return":       float(latest["Return"]),
+            "Return_5d":    return_5d_val,
+            "OBV_ratio":    obv_ratio_val
         }])
         prediction = model.predict(features_df.values)[0]
         prob = float(model.predict_proba(features_df.values)[0].max())
@@ -1432,6 +1578,8 @@ def analyze_stock_data(symbol, period="3mo"):
 # ========================
 # SIDEBAR MENU
 # ========================
+auto_train_model_if_missing()
+
 with st.sidebar:
     st.header("⚙️ Menu")
 
@@ -1445,8 +1593,40 @@ with st.sidebar:
     st.subheader("Model Status")
     if model is not None:
         st.success("✅ Model Loaded & Ready")
+        if hasattr(model, "n_features_in_"):
+            st.caption(f"Features: {int(model.n_features_in_)}")
+        if os.path.exists(MODEL_PATH):
+            st.caption("File: stock_model.pkl")
     else:
         st.error("❌ Model Not Loaded")
+        if os.path.exists(MODEL_PATH):
+            try:
+                temp_model = joblib.load(MODEL_PATH)
+                detected = getattr(temp_model, "n_features_in_", "unknown")
+                st.caption(f"Detected model features: {detected}")
+            except Exception:
+                st.caption("Model file exists but could not be read.")
+        else:
+            st.caption("No trained model file found. Train once from Train Model page.")
+            st.caption("You can also train and load it directly from here.")
+
+            if st.button("🧠 Train & Load Model", use_container_width=True):
+                with st.spinner("Training model. Please wait..."):
+                    try:
+                        result = train_model_func()
+                        if result is not None and result.get("model") is not None:
+                            st.session_state["last_train_metrics"] = result.get("metrics", {})
+                            st.session_state["train_success"] = True
+                            load_model.clear()
+                            st.rerun()
+                        else:
+                            st.error("❌ Training did not complete. Please check warnings and retry.")
+                    except Exception as e:
+                        st.error(f"Training failed: {e}")
+
+    if st.button("🔄 Reload Model", use_container_width=True):
+        load_model.clear()
+        st.rerun()
 
 # ========================
 # PAGE: SINGLE STOCK ANALYSIS
@@ -1876,6 +2056,15 @@ elif page == "Market Summary":
 elif page == "Train Model":
     st.header("🧠 Train ML Model")
 
+    if st.session_state.get("train_success"):
+        st.success("✅ Model trained and loaded successfully!")
+        m = st.session_state.get("last_train_metrics")
+        if m:
+            st.caption(
+                f"Validation Metrics → Accuracy: {m['accuracy']:.2%} | Precision: {m['precision']:.2%} | Recall: {m['recall']:.2%} | F1: {m['f1']:.2%}"
+            )
+        st.session_state["train_success"] = False
+
     st.info(
         "This will download 5 years of historical data for all stocks "
         "and train a RandomForest model. This may take several minutes."
@@ -1884,10 +2073,14 @@ elif page == "Train Model":
     if st.button("Start Training", type="primary"):
         with st.spinner("Training model..."):
             try:
-                new_model = train_model_func()
-                load_model.clear()
-                st.success("✅ Model trained and saved successfully!")
-                st.rerun()
+                result = train_model_func()
+                if result is not None and result.get("model") is not None:
+                    st.session_state["last_train_metrics"] = result.get("metrics", {})
+                    st.session_state["train_success"] = True
+                    load_model.clear()
+                    st.rerun()
+                else:
+                    st.error("❌ Training did not complete. Please check the warnings above and try again.")
             except Exception as e:
                 st.error(f"Error: {e}")
 
@@ -1898,35 +2091,26 @@ elif page == "Train Model":
 
 elif page == "Email Alerts":
     st.header("🔔 Stock Alerts")
-    st.write("Scan all stocks and push **high-conviction signals** via **Telegram** or **Email**.")
+    st.write("Scan all stocks and push **high-conviction signals** via **Gmail**.")
 
     st.divider()
 
-    notify_method = st.radio("Notification Method", ["📱 Telegram (Recommended)", "📧 Gmail"], horizontal=True)
-
-    if "Telegram" in notify_method:
-        st.subheader("📱 Telegram Setup")
-        st.caption(
-            "**One-time setup:**\n"
-            "1. Open Telegram → search **@BotFather** → send `/newbot` → copy the **Bot Token** into `.env`\n"
-            "2. Open your new bot and send it any message (e.g. `hello`)\n"
-            "3. The system will auto-detect your Chat ID"
-        )
-        if TELEGRAM_BOT_TOKEN:
-            st.success("✅ Bot Token loaded from .env")
-        else:
-            st.error("❌ TELEGRAM_BOT_TOKEN not found in .env")
+    st.subheader("📧 Gmail OAuth Setup")
+    st.caption(
+        "Uses **OAuth 2.0** with refresh token. Configure `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, "
+        "`GMAIL_REFRESH_TOKEN`, and `GMAIL_SENDER` in your `.env` file."
+    )
+    recipients_input = st.text_area(
+        "Send alerts to (one or more emails)",
+        value="",
+        placeholder="recipient1@gmail.com, recipient2@gmail.com\nrecipient3@gmail.com",
+        key="recipient_emails",
+        height=90,
+    )
+    if GMAIL_REFRESH_TOKEN and GMAIL_REFRESH_TOKEN != "YOUR_REFRESH_TOKEN":
+        st.success("✅ Gmail OAuth credentials loaded from .env")
     else:
-        st.subheader("📧 Gmail OAuth Setup")
-        st.caption(
-            "Uses **OAuth 2.0** with refresh token. Configure `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, "
-            "`GMAIL_REFRESH_TOKEN`, and `GMAIL_SENDER` in your `.env` file."
-        )
-        recipient_email = st.text_input("Send alerts to (email)", value="", placeholder="recipient@gmail.com", key="recipient_email")
-        if GMAIL_REFRESH_TOKEN and GMAIL_REFRESH_TOKEN != "YOUR_REFRESH_TOKEN":
-            st.success("✅ Gmail OAuth credentials loaded from .env")
-        else:
-            st.warning("⚠️ Set GMAIL_REFRESH_TOKEN in .env (run refresh.py to get it)")
+        st.warning("⚠️ Set GMAIL_REFRESH_TOKEN in .env (run refresh.py to get it)")
 
     st.divider()
 
@@ -1942,17 +2126,27 @@ elif page == "Email Alerts":
     if st.button("🚀 Scan & Send Alert", type="primary"):
         # Validate inputs
         can_send = True
-        if "Telegram" in notify_method:
-            if not TELEGRAM_BOT_TOKEN:
-                st.error("❌ TELEGRAM_BOT_TOKEN not found in .env file.")
+        if not GMAIL_REFRESH_TOKEN or GMAIL_REFRESH_TOKEN == "YOUR_REFRESH_TOKEN":
+            st.error("❌ Gmail OAuth not configured. Set GMAIL_REFRESH_TOKEN in .env.")
+            can_send = False
+        recipients = []
+        seen = set()
+        for raw_email in recipients_input.replace("\n", ",").split(","):
+            email = raw_email.strip()
+            if not email:
+                continue
+            normalized = email.lower()
+            if "@" not in email or "." not in email.split("@")[-1]:
+                st.error(f"Invalid email: {email}")
                 can_send = False
-        else:
-            if not GMAIL_REFRESH_TOKEN or GMAIL_REFRESH_TOKEN == "YOUR_REFRESH_TOKEN":
-                st.error("❌ Gmail OAuth not configured. Set GMAIL_REFRESH_TOKEN in .env.")
-                can_send = False
-            elif not recipient_email:
-                st.error("Please enter a recipient email address.")
-                can_send = False
+                continue
+            if normalized not in seen:
+                recipients.append(email)
+                seen.add(normalized)
+
+        if not recipients:
+            st.error("Please enter at least one valid recipient email address.")
+            can_send = False
 
         if model is None:
             st.error("ML model not trained. Train the model first.")
@@ -1987,139 +2181,79 @@ elif page == "Email Alerts":
             else:
                 now_str = datetime.now().strftime("%d-%b-%Y %I:%M %p")
 
-                # ── Build Telegram message ──
-                if "Telegram" in notify_method:
-                    lines = []
-                    lines.append(f"📈 *Stock Alert — {now_str}*")
-                    lines.append(f"Threshold: |score| ≥ {alert_threshold}  |  Period: {alert_period}\n")
-
-                    if strong_stocks:
-                        strong_stocks.sort(key=lambda x: x.get("pro_score", 0), reverse=True)
-                        lines.append("🎯 *High\\-Conviction Picks:*")
-                        for s in strong_stocks:
-                            emoji = "🟢" if s["pro_score"] > 0 else "🔴"
-                            lines.append(
-                                f"{emoji} *{s['stock'].replace('.', '\\.')}*  ₹{s['current_price']}  "
-                                f"Score: *{s['pro_score']:+d}/10*  {s['recommendation']}  "
-                                f"RSI: {s['rsi_value']}  Entry: ₹{s['entry_price']}"
-                            )
-                        lines.append("")
-
-                    if swing_picks:
-                        swing_picks.sort(key=lambda x: abs(x.get("score", 0)), reverse=True)
-                        lines.append("🔔 *Swing Trading Setups:*")
-                        for sw in swing_picks:
-                            emoji = "🟢" if sw["score"] > 0 else "🔴"
-                            sl = sw["stop_loss_long"] if "BUY" in sw["swing_type"] else sw["stop_loss_short"]
-                            target = sw["swing_target_up"] if "BUY" in sw["swing_type"] else sw["swing_target_down"]
-                            lines.append(
-                                f"{emoji} *{sw['stock'].replace('.', '\\.')}*  ₹{sw['close']}  "
-                                f"Score: *{sw['score']:+d}*  {sw['swing_type']}  "
-                                f"RSI: {sw['rsi']}  Target: ₹{target}  SL: ₹{sl}"
-                            )
-                        lines.append("")
-
-                    lines.append("_Powered by S H A K T H I ❤️_")
-                    tg_message = "\n".join(lines)
-
-                    # Send via Telegram Bot API (auto chat ID)
-                    chat_id = resolve_telegram_chat_id(TELEGRAM_BOT_TOKEN)
-
-                    if not chat_id:
-                        st.error("❌ No chat ID found. Add TELEGRAM_CHAT_ID to .env or send a message to your Telegram bot first (e.g. 'hello').")
-                    else:
-                        try:
-                            tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                            tg_payload = {
-                                "chat_id": chat_id,
-                                "text": tg_message,
-                                "parse_mode": "Markdown",
-                            }
-                            tg_resp = requests.post(tg_url, json=tg_payload, timeout=15)
-                            tg_resp.raise_for_status()
-                            tg_result = tg_resp.json()
-
-                            if tg_result.get("ok"):
-                                st.success(f"✅ Telegram alert sent! ({len(strong_stocks)} picks + {len(swing_picks)} swing)")
-                                st.toast("📱 Telegram notification sent!", icon="✅")
-                            else:
-                                err_desc = tg_result.get("description", "Unknown error")
-                                st.error(f"❌ Telegram API error: {err_desc}")
-                        except requests.exceptions.HTTPError as e:
-                            response_text = e.response.text if e.response is not None else str(e)
-                            st.error(f"❌ Telegram request failed: {response_text}")
-                        except requests.exceptions.ConnectionError as e:
-                            st.error(f"❌ Could not connect to Telegram: {e}")
-                        except requests.exceptions.Timeout:
-                            st.error("❌ Telegram request timed out. Check your network or try again.")
-                        except Exception as e:
-                            st.error(f"❌ Telegram send failed: {e}")
-
-                    # Show preview
-                    with st.expander("📬 Message Preview", expanded=True):
-                        preview_text = tg_message.replace("\\.", ".").replace("\\-", "-").replace("*", "**")
-                        st.markdown(preview_text)
-
                 # ── Build & send Gmail ──
-                else:
-                    html_parts = []
-                    html_parts.append(f"<h2>📈 Stock Alert — {now_str}</h2>")
-                    html_parts.append(f"<p>Threshold: |score| ≥ {alert_threshold} &nbsp;|&nbsp; Period: {alert_period}</p>")
+                html_parts = []
+                html_parts.append(f"<h2>📈 Stock Alert — {now_str}</h2>")
+                html_parts.append(f"<p>Threshold: |score| ≥ {alert_threshold} &nbsp;|&nbsp; Period: {alert_period}</p>")
 
-                    if strong_stocks:
-                        strong_stocks.sort(key=lambda x: x.get("pro_score", 0), reverse=True)
-                        html_parts.append("<h3>🎯 High-Conviction Analysis Picks</h3>")
-                        html_parts.append('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial;">')
-                        html_parts.append('<tr style="background:#222;color:#fff;"><th>Stock</th><th>Price</th><th>Pro Score</th><th>Recommendation</th><th>RSI</th><th>Entry</th><th>Confidence</th></tr>')
-                        for s in strong_stocks:
-                            color = "#27ae60" if s["pro_score"] > 0 else "#e74c3c"
-                            html_parts.append(
-                                f'<tr><td><b>{s["stock"]}</b></td>'
-                                f'<td>₹{s["current_price"]}</td>'
-                                f'<td style="color:{color};font-weight:bold;">{s["pro_score"]:+d}/10</td>'
-                                f'<td>{s["recommendation"]}</td>'
-                                f'<td>{s["rsi_value"]}</td>'
-                                f'<td>₹{s["entry_price"]}</td>'
-                                f'<td>{s["confidence_percent"]}%</td></tr>'
-                            )
-                        html_parts.append('</table>')
+                if strong_stocks:
+                    strong_stocks.sort(key=lambda x: x.get("pro_score", 0), reverse=True)
+                    html_parts.append("<h3>🎯 High-Conviction Analysis Picks</h3>")
+                    html_parts.append('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial;">')
+                    html_parts.append('<tr style="background:#222;color:#fff;"><th>Stock</th><th>Price</th><th>Pro Score</th><th>Recommendation</th><th>RSI</th><th>Entry</th><th>Confidence</th></tr>')
+                    for s in strong_stocks:
+                        color = "#27ae60" if s["pro_score"] > 0 else "#e74c3c"
+                        html_parts.append(
+                            f'<tr><td><b>{s["stock"]}</b></td>'
+                            f'<td>₹{s["current_price"]}</td>'
+                            f'<td style="color:{color};font-weight:bold;">{s["pro_score"]:+d}/10</td>'
+                            f'<td>{s["recommendation"]}</td>'
+                            f'<td>{s["rsi_value"]}</td>'
+                            f'<td>₹{s["entry_price"]}</td>'
+                            f'<td>{s["confidence_percent"]}%</td></tr>'
+                        )
+                    html_parts.append('</table>')
 
-                    if swing_picks:
-                        swing_picks.sort(key=lambda x: abs(x.get("score", 0)), reverse=True)
-                        html_parts.append("<h3>🔔 Swing Trading Setups</h3>")
-                        html_parts.append('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial;">')
-                        html_parts.append('<tr style="background:#222;color:#fff;"><th>Stock</th><th>Price</th><th>Score</th><th>Signal</th><th>RSI</th><th>Target Up</th><th>Target Down</th><th>Stop Loss</th><th>Expiry</th></tr>')
-                        for sw in swing_picks:
-                            color = "#27ae60" if sw["score"] > 0 else "#e74c3c"
-                            sl = sw["stop_loss_long"] if "BUY" in sw["swing_type"] else sw["stop_loss_short"]
-                            html_parts.append(
-                                f'<tr><td><b>{sw["stock"]}</b></td>'
-                                f'<td>₹{sw["close"]}</td>'
-                                f'<td style="color:{color};font-weight:bold;">{sw["score"]:+d}</td>'
-                                f'<td>{sw["swing_type"]}</td>'
-                                f'<td>{sw["rsi"]}</td>'
-                                f'<td>₹{sw["swing_target_up"]}</td>'
-                                f'<td>₹{sw["swing_target_down"]}</td>'
-                                f'<td>₹{sl}</td>'
-                                f'<td>{sw.get("expiry_date", "N/A")}</td></tr>'
-                            )
-                        html_parts.append('</table>')
+                if swing_picks:
+                    swing_picks.sort(key=lambda x: abs(x.get("score", 0)), reverse=True)
+                    html_parts.append("<h3>🔔 Swing Trading Setups</h3>")
+                    html_parts.append('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial;">')
+                    html_parts.append('<tr style="background:#222;color:#fff;"><th>Stock</th><th>Price</th><th>Score</th><th>Signal</th><th>RSI</th><th>Target Up</th><th>Target Down</th><th>Stop Loss</th><th>Expiry</th></tr>')
+                    for sw in swing_picks:
+                        color = "#27ae60" if sw["score"] > 0 else "#e74c3c"
+                        sl = sw["stop_loss_long"] if "BUY" in sw["swing_type"] else sw["stop_loss_short"]
+                        html_parts.append(
+                            f'<tr><td><b>{sw["stock"]}</b></td>'
+                            f'<td>₹{sw["close"]}</td>'
+                            f'<td style="color:{color};font-weight:bold;">{sw["score"]:+d}</td>'
+                            f'<td>{sw["swing_type"]}</td>'
+                            f'<td>{sw["rsi"]}</td>'
+                            f'<td>₹{sw["swing_target_up"]}</td>'
+                            f'<td>₹{sw["swing_target_down"]}</td>'
+                            f'<td>₹{sl}</td>'
+                            f'<td>{sw.get("expiry_date", "N/A")}</td></tr>'
+                        )
+                    html_parts.append('</table>')
 
-                    html_parts.append("<br><p style='color:#888;font-size:12px;'>Sent by AI Stock Analyzer | Powered by S H A K T H I ❤️</p>")
-                    html_body = "\n".join(html_parts)
+                html_parts.append("<br><p style='color:#888;font-size:12px;'>Sent by AI Stock Analyzer | Powered by S H A K T H I ❤️</p>")
+                html_body = "\n".join(html_parts)
 
+                success_recipients = []
+                failed_recipients = []
+
+                for email in recipients:
                     try:
                         send_gmail_oauth(
-                            recipient_email,
+                            email,
                             f"📈 Stock Alert: {len(strong_stocks)} analysis + {len(swing_picks)} swing picks ({now_str})",
                             html_body
                         )
-                        st.success(f"✅ Email sent to **{recipient_email}**!")
-                        st.toast(f"📧 Alert sent to {recipient_email}", icon="✅")
-                        with st.expander("📬 Email Preview", expanded=True):
-                            st.html(html_body)
+                        success_recipients.append(email)
                     except Exception as e:
-                        st.error(f"❌ Failed to send email: {e}")
+                        failed_recipients.append((email, str(e)))
+
+                if success_recipients:
+                    st.success(f"✅ Email sent to {len(success_recipients)} recipient(s).")
+                    st.caption("Sent to: " + ", ".join(success_recipients))
+                    st.toast(f"📧 Alerts sent to {len(success_recipients)} recipient(s)", icon="✅")
+
+                if failed_recipients:
+                    st.error(f"❌ Failed for {len(failed_recipients)} recipient(s).")
+                    for email, err in failed_recipients:
+                        st.caption(f"{email}: {err}")
+
+                with st.expander("📬 Email Preview", expanded=True):
+                    st.html(html_body)
 
 
 def get_gmail_service():
