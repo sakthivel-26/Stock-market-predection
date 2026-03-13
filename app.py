@@ -21,7 +21,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import time
-from streamlit_pwa import pwa
+
 
 
 from dotenv import load_dotenv
@@ -111,29 +111,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-
-
-
-pwa(
-    name="AI Stock Analyzer",
-    short_name="StockAI",
-    description="AI powered stock market analyzer",
-    theme_color="#0c111c",
-    background_color="#0c111c",
-    icon="https://cdn-icons-png.flaticon.com/512/2721/2721265.png"
-)
-
-
-main()
-
 st.markdown(
     """
     <style>
-    .shakthi-powered-badge {
+    .shakthi-badge-wrap {
         position: fixed;
         right: 18px;
         bottom: 18px;
         z-index: 9999;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .shakthi-powered-badge {
         padding: 10px 14px;
         border-radius: 999px;
         background: rgba(12, 17, 28, 0.88);
@@ -145,16 +136,61 @@ st.markdown(
         backdrop-filter: blur(10px);
     }
 
+    .shakthi-github-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        text-decoration: none;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(12, 17, 28, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: #f5f7fb;
+        font-size: 13px;
+        font-weight: 600;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        backdrop-filter: blur(10px);
+        transition: transform 0.18s ease, border-color 0.18s ease;
+    }
+
+    .shakthi-github-badge:hover {
+        transform: translateY(-1px);
+        border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    .shakthi-github-badge svg {
+        width: 16px;
+        height: 16px;
+        fill: currentColor;
+    }
+
     @media (max-width: 640px) {
-        .shakthi-powered-badge {
+        .shakthi-badge-wrap {
             right: 12px;
             bottom: 12px;
+            gap: 8px;
+        }
+
+        .shakthi-powered-badge {
+            font-size: 12px;
+            padding: 8px 12px;
+        }
+
+        .shakthi-github-badge {
             font-size: 12px;
             padding: 8px 12px;
         }
     }
     </style>
-    <div class="shakthi-powered-badge">Powered by S H A K T H I ❤️</div>
+    <div class="shakthi-badge-wrap">
+        <div class="shakthi-powered-badge">Powered by S H A K T H I ❤️</div>
+        <a class="shakthi-github-badge" href="https://github.com/sakthivel-26" target="_blank" rel="noopener noreferrer" title="Connect on GitHub">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+            </svg>
+            GitHub
+        </a>
+    </div>
     """,
     unsafe_allow_html=True,
 )
@@ -269,6 +305,40 @@ SYMBOL_ALIASES = {
     "ZOMATO.NS": ["ETERNAL.NS"],
 }
 
+# Fallback map when some BSE Yahoo tickers are temporarily unavailable.
+BSE_TO_NSE_ALIASES = {
+    "500325.BO": "RELIANCE.NS",
+    "532540.BO": "TCS.NS",
+    "500180.BO": "HDFCBANK.NS",
+    "532454.BO": "BHARTIARTL.NS",
+    "532174.BO": "ICICIBANK.NS",
+    "500209.BO": "INFY.NS",
+    "500112.BO": "SBIN.NS",
+    "500696.BO": "HINDUNILVR.NS",
+    "500875.BO": "ITC.NS",
+    "543526.BO": "LICI.NS",
+    "500510.BO": "LT.NS",
+    "524715.BO": "SUNPHARMA.NS",
+    "532215.BO": "AXISBANK.NS",
+    "500247.BO": "KOTAKBANK.NS",
+    "500034.BO": "BAJFINANCE.NS",
+    "532500.BO": "MARUTI.NS",
+    "532555.BO": "NTPC.NS",
+    "532538.BO": "ULTRACEMCO.NS",
+    "500114.BO": "TITAN.NS",
+    "500820.BO": "ASIANPAINT.NS",
+    "500790.BO": "NESTLEIND.NS",
+    "500520.BO": "M&M.NS",
+    "532898.BO": "POWERGRID.NS",
+    "532921.BO": "ADANIPORTS.NS",
+    "500570.BO": "TATAMOTORS.NS",
+    "507685.BO": "WIPRO.NS",
+    "500228.BO": "JSWSTEEL.NS",
+    "533278.BO": "COALINDIA.NS",
+    "532281.BO": "HCLTECH.NS",
+    "532978.BO": "BAJAJFINSV.NS",
+}
+
 # ========================
 # LOAD MODEL
 # ========================
@@ -359,7 +429,11 @@ def tradingview_mini_chart(symbol, height=220):
     """Render a TradingView mini chart widget for an NSE or BSE stock."""
     symbol = symbol.upper()
     if symbol.endswith(".BO"):
-        tv_symbol = "BSE:" + symbol.replace(".BO", "")
+        mapped_nse = BSE_TO_NSE_ALIASES.get(symbol)
+        if mapped_nse:
+            tv_symbol = "NSE:" + mapped_nse.replace(".NS", "")
+        else:
+            tv_symbol = "BSE:" + symbol.replace(".BO", "")
     else:
         tv_symbol = "NSE:" + symbol.replace(".NS", "")
 
@@ -846,6 +920,28 @@ def get_swing_expiry_date(period):
     return expiry_dt.strftime("%d-%b-%Y")
 
 
+def normalize_symbol_input(raw_symbol, is_bse=False):
+    """Normalize manual symbol input for reliable Yahoo/TradingView lookups."""
+    symbol = raw_symbol.strip().upper().replace(" ", "")
+
+    if not symbol:
+        return symbol
+
+    if is_bse:
+        if symbol.isdigit():
+            return f"{symbol}.BO"
+        if not symbol.endswith(".BO") and not symbol.endswith(".NS"):
+            return f"{symbol}.BO"
+        return symbol
+
+    if symbol.isdigit():
+        # Users sometimes paste BSE scrip codes while NSE is selected.
+        return f"{symbol}.BO"
+    if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
+        return f"{symbol}.NS"
+    return symbol
+
+
 @st.cache_data(ttl=1800)
 def get_nse_nearest_option_expiry(symbol_clean):
     """Fetch nearest valid NSE option expiry for an equity symbol.
@@ -1243,7 +1339,23 @@ def safe_download(symbol, period="5y"):
     Prevents crashes if Yahoo fails or returns empty data.
     """
     base_symbol = symbol.upper()
-    symbols_to_try = [base_symbol] + SYMBOL_ALIASES.get(base_symbol, [])
+
+    symbols_to_try = [base_symbol]
+
+    # Yahoo occasionally fails for BSE (.BO) symbols. Fall back to NSE ticker.
+    if base_symbol.endswith(".BO"):
+        mapped_nse = BSE_TO_NSE_ALIASES.get(base_symbol)
+        if mapped_nse:
+            symbols_to_try.append(mapped_nse)
+
+    # Include known alias chain for each candidate.
+    expanded_symbols = []
+    for sym in symbols_to_try:
+        expanded_symbols.append(sym)
+        expanded_symbols.extend(SYMBOL_ALIASES.get(sym, []))
+
+    # De-duplicate while preserving order.
+    symbols_to_try = list(dict.fromkeys(expanded_symbols))
 
     # For training, fall back to shorter history if 5y is unavailable for newer listings.
     periods_to_try = [period]
@@ -1668,7 +1780,7 @@ if page == "Single Stock Analysis":
             )
 
     if custom.strip():
-        symbol = custom.strip().upper()
+        symbol = normalize_symbol_input(custom, is_bse=is_bse)
     elif is_bse and picked != "(type custom)":
         symbol = BSE_STOCKS[picked]
     elif not is_bse and picked != "(type custom)":
@@ -1693,7 +1805,7 @@ if page == "Single Stock Analysis":
             c1.metric("Current Rate",   f"₹{result['current_price']}")
             c2.metric("Entry Price",    f"₹{result['entry_price']}")
             c3.metric("ATR",            f"₹{result['atr']}")
-            c4.metric("Prediction",     result["prediction"])
+            c4.metric("ML Direction",   result["prediction"])
             c5.metric("Confidence",     f"{result['confidence_percent']}%")
             c6.metric("Pro Score",      f"{result['pro_score']:+d} / 10")
 
@@ -1708,6 +1820,8 @@ if page == "Single Stock Analysis":
                 c7.error(f"🟥 {rec}")
             else:
                 c7.warning(f"🟡 {rec}")
+
+            st.caption("ML Direction is the model-only signal. Final recommendation uses combined technical + ML Pro Score.")
 
             st.divider()
             st.info(f"🤖 {result['ai_explanation']}")
