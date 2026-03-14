@@ -20,6 +20,7 @@ from email.mime.text import MIMEText
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 
@@ -27,17 +28,8 @@ import time
 from dotenv import load_dotenv
 import os
 
-def send_gmail_oauth(recipient_email, subject, html_body):
-    """
-    Send email using Gmail OAuth with auto refresh token
-    """
-
-    import base64
-    from email.mime.text import MIMEText
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
-
+def get_gmail_service():
+    """Build a Gmail API client using the configured OAuth refresh token."""
     creds = Credentials(
         None,
         refresh_token=GMAIL_REFRESH_TOKEN,
@@ -46,11 +38,15 @@ def send_gmail_oauth(recipient_email, subject, html_body):
         token_uri="https://oauth2.googleapis.com/token",
     )
 
-    # auto refresh token
     if not creds.valid:
         creds.refresh(Request())
 
-    service = build("gmail", "v1", credentials=creds)
+    return build("gmail", "v1", credentials=creds)
+
+
+def send_gmail_oauth(recipient_email, subject, html_body, service=None):
+    """Send email using Gmail OAuth, optionally reusing an existing Gmail service."""
+    gmail_service = service or get_gmail_service()
 
     message = MIMEText(html_body, "html")
     message["to"] = recipient_email
@@ -59,7 +55,7 @@ def send_gmail_oauth(recipient_email, subject, html_body):
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
-    service.users().messages().send(
+    gmail_service.users().messages().send(
         userId="me",
         body={"raw": raw}
     ).execute()
@@ -1509,9 +1505,24 @@ def analyze_stock_data(symbol, period="3mo"):
         }])
         prediction = model.predict(features_df.values)[0]
         prob = float(model.predict_proba(features_df.values)[0].max())
-        direction = "UP" if prediction == 1 else "DOWN"
-        pro_score += 2 if direction == "UP" else -2
-        if prob >= 0.7: pro_score += 1 if direction == "UP" else -1
+        raw_direction = "UP" if prediction == 1 else "DOWN"
+
+        # Confidence-aware ML weighting improves signal quality by avoiding
+        # overreacting to uncertain model outputs.
+        if prob < 0.60:
+            direction = "NEUTRAL"
+            ml_score = 0
+        elif prob < 0.72:
+            direction = raw_direction
+            ml_score = 1 if direction == "UP" else -1
+        elif prob < 0.85:
+            direction = raw_direction
+            ml_score = 2 if direction == "UP" else -2
+        else:
+            direction = raw_direction
+            ml_score = 3 if direction == "UP" else -3
+
+        pro_score += ml_score
 
         # 2. MACD trend confirmation
         if prev_macd_hist <= 0 and macd_hist > 0:
@@ -1570,8 +1581,10 @@ def analyze_stock_data(symbol, period="3mo"):
                 pro_score += 2
             elif vol_ratio > 1.5 and direction == "DOWN":
                 pro_score -= 2
-            elif vol_ratio > 1.2:
-                pro_score += 1 if direction == "UP" else -1
+            elif vol_ratio > 1.2 and direction == "UP":
+                pro_score += 1
+            elif vol_ratio > 1.2 and direction == "DOWN":
+                pro_score -= 1
 
         # 7. OBV trend
         if obv_rising and direction == "UP":
@@ -1677,6 +1690,28 @@ def analyze_stock_data(symbol, period="3mo"):
 
     except Exception as e:
         return {"error": str(e)}
+
+
+def scan_alert_candidate(symbol, period, include_swing, alert_threshold):
+    """Analyze one stock for alert generation, returning only qualifying results."""
+    analysis_pick = None
+    swing_pick = None
+
+    analysis = analyze_stock_data(symbol, period)
+    if isinstance(analysis, dict) and "error" not in analysis:
+        if abs(analysis.get("pro_score", 0)) >= alert_threshold:
+            analysis_pick = analysis
+
+    if include_swing:
+        swing = detect_swing_signals(symbol, period=period)
+        if swing and abs(swing.get("score", 0)) >= alert_threshold:
+            swing_pick = swing
+
+    return {
+        "analysis": analysis_pick,
+        "swing": swing_pick,
+    }
+
 # ========================
 # SIDEBAR MENU
 # ========================
@@ -1821,7 +1856,7 @@ if page == "Single Stock Analysis":
             else:
                 c7.warning(f"🟡 {rec}")
 
-            st.caption("ML Direction is the model-only signal. Final recommendation uses combined technical + ML Pro Score.")
+            st.caption("ML Direction is model-only. NEUTRAL means low ML confidence. Final recommendation uses combined technical + ML Pro Score.")
 
             st.divider()
             st.info(f"🤖 {result['ai_explanation']}")
@@ -1896,12 +1931,33 @@ elif page == "Swing Trading Alerts":
     if st.button("🔍 Scan for Swing Trades", type="primary"):
         swing_results = []
         progress = st.progress(0)
+        status = st.empty()
 
-        for idx, symbol in enumerate(SCANNER_STOCKS):
-            result = detect_swing_signals(symbol, period=scan_period)
-            if result and result["swing_type"] in filter_type:
-                swing_results.append(result)
-            progress.progress((idx + 1) / len(SCANNER_STOCKS))
+        total = len(SCANNER_STOCKS)
+        max_workers = min(12, max(4, (os.cpu_count() or 4) * 2))
+        status.text(f"Scanning {total} stocks with {max_workers} workers...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(detect_swing_signals, symbol, scan_period): symbol
+                for symbol in SCANNER_STOCKS
+            }
+
+            completed = 0
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    result = future.result()
+                    if result and result["swing_type"] in filter_type:
+                        swing_results.append(result)
+                except Exception:
+                    pass
+
+                completed += 1
+                status.text(f"Analyzed {completed}/{total}: {symbol}")
+                progress.progress(completed / total)
+
+        status.text("Scan complete. Sorting results...")
 
         # Fire toast notifications for actionable signals
         buy_alerts = [r for r in swing_results if "BUY" in r["swing_type"]]
@@ -2008,12 +2064,30 @@ elif page == "Market Scanner":
         with st.spinner("Scanning market..."):
             results = []
             progress_bar = st.progress(0)
+            status = st.empty()
 
-            for idx, symbol in enumerate(SCANNER_STOCKS):
-                analysis = analyze_stock_data(symbol)
-                if "error" not in analysis:
-                    results.append(analysis)
-                progress_bar.progress((idx + 1) / len(SCANNER_STOCKS))
+            total = len(SCANNER_STOCKS)
+            max_workers = min(12, max(4, (os.cpu_count() or 4) * 2))
+            status.text(f"Scanning {total} stocks with {max_workers} workers...")
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(analyze_stock_data, symbol): symbol for symbol in SCANNER_STOCKS}
+
+                completed = 0
+                for future in as_completed(futures):
+                    symbol = futures[future]
+                    try:
+                        analysis = future.result()
+                        if isinstance(analysis, dict) and "error" not in analysis:
+                            results.append(analysis)
+                    except Exception:
+                        pass
+
+                    completed += 1
+                    status.text(f"Analyzed {completed}/{total}: {symbol}")
+                    progress_bar.progress(completed / total)
+
+            status.text("Scan complete. Building results...")
 
             st.success(f"✅ Scanned {len(results)} stocks")
             st.divider()
@@ -2027,18 +2101,23 @@ elif page == "Market Scanner":
             filtered_results = [r for r in results if r["recommendation"] in recommendation_filter]
 
             st.subheader("📊 Scanner Results")
+            st.caption("ML Direction is model-only. NEUTRAL means low ML confidence. Recommendation is from combined Pro Score (technicals + ML).")
 
             for stock in filtered_results:
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5, col6 = st.columns(6)
 
                 with col1:
-                    st.metric(stock["stock"], stock["prediction"])
+                    st.metric("Stock", stock["stock"])
                 with col2:
-                    st.metric("Confidence", f"{stock['confidence_percent']}%")
+                    st.metric("ML Direction", stock["prediction"])
                 with col3:
+                    st.metric("Confidence", f"{stock['confidence_percent']}%")
+                with col4:
                     rec_color = "🟢" if stock["recommendation"] == "BUY" else "🔴" if stock["recommendation"] == "SELL" else "🟡"
                     st.metric("Recommendation", f"{rec_color} {stock['recommendation']}")
-                with col4:
+                with col5:
+                    st.metric("Pro Score", f"{stock['pro_score']:+d} / 10")
+                with col6:
                     st.metric("RSI", stock["rsi_value"])
 
                 st.divider()
@@ -2264,19 +2343,36 @@ elif page == "Email Alerts":
             swing_picks = []
 
             total = len(SCANNER_STOCKS)
-            for idx, sym in enumerate(SCANNER_STOCKS):
-                status.text(f"Analyzing {sym} ({idx+1}/{total})...")
+            max_workers = min(12, max(4, (os.cpu_count() or 4) * 2))
+            status.text(f"Scanning {total} stocks with {max_workers} workers...")
 
-                res = analyze_stock_data(sym, alert_period)
-                if "error" not in res and abs(res.get("pro_score", 0)) >= alert_threshold:
-                    strong_stocks.append(res)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        scan_alert_candidate,
+                        sym,
+                        alert_period,
+                        include_swing,
+                        alert_threshold,
+                    ): sym
+                    for sym in SCANNER_STOCKS
+                }
 
-                if include_swing:
-                    sw = detect_swing_signals(sym, period=alert_period)
-                    if sw and abs(sw.get("score", 0)) >= alert_threshold:
-                        swing_picks.append(sw)
+                completed = 0
+                for future in as_completed(futures):
+                    symbol = futures[future]
+                    try:
+                        result = future.result()
+                        if result["analysis"] is not None:
+                            strong_stocks.append(result["analysis"])
+                        if result["swing"] is not None:
+                            swing_picks.append(result["swing"])
+                    except Exception:
+                        pass
 
-                progress.progress((idx + 1) / total)
+                    completed += 1
+                    status.text(f"Analyzed {completed}/{total}: {symbol}")
+                    progress.progress(completed / total)
 
             status.text("Scan complete. Building alert...")
 
@@ -2334,17 +2430,25 @@ elif page == "Email Alerts":
 
                 success_recipients = []
                 failed_recipients = []
+                gmail_service = None
 
-                for email in recipients:
-                    try:
-                        send_gmail_oauth(
-                            email,
-                            f"📈 Stock Alert: {len(strong_stocks)} analysis + {len(swing_picks)} swing picks ({now_str})",
-                            html_body
-                        )
-                        success_recipients.append(email)
-                    except Exception as e:
-                        failed_recipients.append((email, str(e)))
+                try:
+                    gmail_service = get_gmail_service()
+                except Exception as e:
+                    st.error(f"❌ Gmail service could not be initialized: {e}")
+
+                if gmail_service is not None:
+                    for email in recipients:
+                        try:
+                            send_gmail_oauth(
+                                email,
+                                f"📈 Stock Alert: {len(strong_stocks)} analysis + {len(swing_picks)} swing picks ({now_str})",
+                                html_body,
+                                service=gmail_service,
+                            )
+                            success_recipients.append(email)
+                        except Exception as e:
+                            failed_recipients.append((email, str(e)))
 
                 if success_recipients:
                     st.success(f"✅ Email sent to {len(success_recipients)} recipient(s).")
@@ -2358,44 +2462,3 @@ elif page == "Email Alerts":
 
                 with st.expander("📬 Email Preview", expanded=True):
                     st.html(html_body)
-
-
-def get_gmail_service():
-    creds = Credentials(
-        None,
-        refresh_token=GMAIL_REFRESH_TOKEN,
-        client_id=GMAIL_CLIENT_ID,
-        client_secret=GMAIL_CLIENT_SECRET,
-        token_uri="https://oauth2.googleapis.com/token"
-    )
-    if not creds.valid:
-        creds.refresh(Request())
-    return build("gmail", "v1", credentials=creds)
-
-
-def send_gmail_oauth(recipient_email, subject, html_body):
-
-    creds = Credentials(
-        None,
-        refresh_token=GMAIL_REFRESH_TOKEN,
-        client_id=GMAIL_CLIENT_ID,
-        client_secret=GMAIL_CLIENT_SECRET,
-        token_uri="https://oauth2.googleapis.com/token",
-    )
-
-    if not creds.valid:
-        creds.refresh(Request())
-
-    service = build("gmail", "v1", credentials=creds)
-
-    message = MIMEText(html_body, "html")
-    message["to"] = recipient_email
-    message["from"] = GMAIL_SENDER
-    message["subject"] = subject
-
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-    service.users().messages().send(
-        userId="me",
-        body={"raw": raw}
-    ).execute()
