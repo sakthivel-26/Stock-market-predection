@@ -6,6 +6,7 @@ Upload this + stock_model.pkl to PythonAnywhere.
 
 import os
 import sys
+import json
 import logging
 from datetime import datetime
 
@@ -19,8 +20,8 @@ import requests
 # ========================
 # CONFIG
 # ========================
-TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8765047819:AAFbik0t5zY7r0XMLvtL4xCdc9OMGQD3LM0")
-TELEGRAM_CHAT_ID = os.environ.get("TG_CHAT_ID", "5085894525")
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN",)
+
 SCORE_THRESHOLD = 6
 SCAN_PERIOD = "3mo"
 
@@ -197,13 +198,36 @@ def analyze_stock(symbol, model, period):
 
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=15)
-    result = resp.json()
-    if not result.get("ok"):
-        log.error(f"Telegram error: {result.get('description')}")
-        return False
-    return True
+
+    users_file = os.path.join(BASE_DIR, "users.json")
+
+    try:
+        with open(users_file, "r") as f:
+            users = json.load(f)
+    except:
+        users = []
+
+    for chat_id in users:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+        try:
+            resp = requests.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": message,
+                    "parse_mode": "Markdown"
+                },
+                timeout=15
+            )
+
+            result = resp.json()
+
+            if not result.get("ok"):
+                log.error(f"Telegram error for {chat_id}: {result.get('description')}")
+
+        except Exception as e:
+            log.error(f"Telegram send error: {e}")
 
 
 def main():
