@@ -2,9 +2,9 @@ name: Daily Stock Alert
 
 on:
   schedule:
-    # 4:30 AM UTC = 10:00 AM IST (every weekday)
-    - cron: '30 4 * * *'
-  workflow_dispatch:  # Manual trigger button
+    # 5:00 AM UTC = 10:30 AM IST
+    - cron: '0 5 * * *'
+  workflow_dispatch:
 
 jobs:
   stock-alert:
@@ -18,13 +18,12 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install yfinance pandas numpy ta joblib scikit-learn requests
+        run: pip install -r cloud_requirements.txt
 
       - name: Run stock alert
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        
         run: python cloud_alert.py
