@@ -1,9 +1,9 @@
 import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-TG_BOT_TOKEN = "8765047819:AAEglibTXP-H6I_pseU9bhYaQkCFTZiB4HQ"
-
+import os
+from dotenv import load_dotenv
+load_dotenv()
 USERS_FILE = "users.json"
 
 def save_user(chat_id):
@@ -24,7 +24,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(chat_id)
     await update.message.reply_text("✅ You will receive daily stock alerts at 10 AM.")
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+app = ApplicationBuilder().token(os.getenv("TG_BOT_TOKEN")).build()
 app.add_handler(CommandHandler("start", start))
 
 app.run_polling()

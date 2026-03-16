@@ -9,25 +9,27 @@ import sys
 import json
 import logging
 from datetime import datetime
-
+import time
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import ta
 import joblib
 import requests
-
+from dotenv import load_dotenv
+load_dotenv()
 # ========================
 # CONFIG
 # ========================
-TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 
 SCORE_THRESHOLD = 6
 SCAN_PERIOD = "3mo"
 
 # PythonAnywhere paths (update username)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "stock_model.pkl")
+MODEL_PATH = "./stock_model.pkl"
+print(f"Model path: {MODEL_PATH}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,19 +70,20 @@ def trim_data(data, period):
 
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        return None
-    try:
-        m = joblib.load(MODEL_PATH)
-        if hasattr(m, "n_features_in_") and m.n_features_in_ != 6:
-            return None
-        return m
-    except Exception:
+        print("Model file missing!")
         return None
 
+    try:
+        model = joblib.load(MODEL_PATH)
+        print("Model loaded successfully")
+        return model
+    except Exception as e:
+        print("Model load error:", e)
+        return None
 
 def analyze_stock(symbol, model, period):
     try:
-        data = yf.download(symbol.upper(), period=get_fetch_period(period), progress=False)
+        data = yf.download(symbol.upper(), period=get_fetch_period(period), progress=False, threads=False)
         if data is None or data.empty:
             return None
         if isinstance(data.columns, pd.MultiIndex):
@@ -137,9 +140,18 @@ def analyze_stock(symbol, model, period):
         elif ma20_dist > 5 and ma50_dist > 5: pro_score += 3
         elif ma20_dist > 3: pro_score += 2
 
-        features = pd.DataFrame([{"MA20": ma20_val, "MA50": ma50_val, "RSI": rsi_val,
-                                   "Volume": vol_cur, "Volume_Avg20": vol_avg20,
-                                   "Return": float(latest["Return"])}])
+        features = pd.DataFrame([{
+    "MA20": ma20_val,
+    "MA50": ma50_val,
+    "RSI": rsi_val,
+    "MACD_Hist": macd_hist,
+    "Volume": vol_cur,
+    "Volume_Avg20": vol_avg20,
+    "Return": float(latest["Return"]),
+    "ATR": atr_val,
+    "OBV": float(latest["OBV"]),
+    "OBV_MA10": float(latest["OBV_MA10"])
+}])
         prediction = model.predict(features.values)[0]
         prob = float(model.predict_proba(features.values)[0].max())
         direction = "UP" if prediction == 1 else "DOWN"
@@ -216,7 +228,6 @@ def send_telegram(message):
                 json={
                     "chat_id": chat_id,
                     "text": message,
-                    "parse_mode": "Markdown"
                 },
                 timeout=15
             )
@@ -249,6 +260,7 @@ def main():
     buy_picks, sell_picks = [], []
     for sym in SCANNER_STOCKS:
         res = analyze_stock(sym, model, SCAN_PERIOD)
+        time.sleep(1)
         if res and abs(res["pro_score"]) >= SCORE_THRESHOLD:
             (buy_picks if res["pro_score"] > 0 else sell_picks).append(res)
 
