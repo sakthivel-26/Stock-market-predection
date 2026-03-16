@@ -5,3 +5,4 @@ ta
 joblib
 scikit-learn
 requests
+python-telegram-bot

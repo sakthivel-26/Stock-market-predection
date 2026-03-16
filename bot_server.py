@@ -2,7 +2,7 @@ import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_TOKEN = "8765047819:AAGp5Y6DMNkyy2qAF2kABC99gPVPtx9BMpM"
 
 USERS_FILE = "users.json"
 

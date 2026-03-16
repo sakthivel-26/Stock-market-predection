@@ -20,7 +20,7 @@ import requests
 # ========================
 # CONFIG
 # ========================
-TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN",)
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 
 SCORE_THRESHOLD = 6
 SCAN_PERIOD = "3mo"
