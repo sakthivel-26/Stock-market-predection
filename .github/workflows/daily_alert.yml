@@ -2,8 +2,7 @@ name: Daily Stock Alert
 
 on:
   schedule:
-    # 5:00 AM UTC = 10:30 AM IST
-    - cron: '0 5 * * *'
+    - cron: '0 5 * * *'   # 10:30 AM IST
   workflow_dispatch:
 
 jobs:
@@ -12,7 +11,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: 📥 Checkout repo
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
 
       - name: 🐍 Setup Python
@@ -25,8 +24,6 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('cloud_requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: 📦 Install dependencies
         run: |
@@ -40,8 +37,7 @@ jobs:
             exit 1
           fi
 
-      - name: 🚀 Run stock alert bot
+      - name: 🚀 Run bot
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        run: |
-          python cloud_alert.py
+        run: python cloud_alert.py
