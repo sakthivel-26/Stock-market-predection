@@ -1,11 +1,19 @@
-import os, sys, json, time, logging
+"""
+Cloud Auto Alert — FIXED VERSION
+"""
+
+import os
+import sys
+import json
+import logging
 from datetime import datetime
+import time
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import ta
 import joblib
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,89 +21,138 @@ load_dotenv()
 # ========================
 # CONFIG
 # ========================
-TOKEN = os.getenv("TG_BOT_TOKEN")
-MODEL_PATH = "stock_model.pkl"
-THRESHOLD = 4
+TELEGRAM_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+
+SCORE_THRESHOLD = 4   # ✅ reduced (important fix)
 SCAN_PERIOD = "3mo"
 
-STOCKS = [
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = "./stock_model.pkl"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(os.path.join(BASE_DIR, "cloud_alert.log")),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger(__name__)
+
+SCANNER_STOCKS = [
     "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
     "SBIN.NS","LT.NS","WIPRO.NS","BHARTIARTL.NS","ITC.NS"
 ]
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger()
+# ========================
+# HELPERS
+# ========================
+def get_fetch_period(period):
+    return {"1wk": "6mo","1mo": "6mo","2mo": "6mo","3mo": "6mo",
+            "6mo": "6mo","1y": "1y","2y": "2y","5y": "5y"}.get(period, period)
 
-# ========================
-# MARKET TREND (NIFTY)
-# ========================
-def get_market_trend():
-    try:
-        data = yf.download("^NSEI", period="5d", progress=False)
-        ma20 = data["Close"].rolling(20).mean().iloc[-1]
-        price = data["Close"].iloc[-1]
+def trim_data(data, period):
+    rows = {"1wk":5,"1mo":22,"2mo":44,"3mo":66,
+            "6mo":132,"1y":252,"2y":504,"5y":1260}.get(period)
+    return data.tail(rows) if rows else data
 
-        if price > ma20:
-            return "BULL"
-        else:
-            return "BEAR"
-    except:
-        return "NEUTRAL"
-
-# ========================
-# MODEL
-# ========================
 def load_model():
-    return joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
+    if not os.path.exists(MODEL_PATH):
+        log.error("Model missing!")
+        return None
+    return joblib.load(MODEL_PATH)
 
 # ========================
 # ANALYSIS
 # ========================
-def analyze(symbol, model, market_trend):
+def analyze_stock(symbol, model, period):
     try:
-        data = yf.download(symbol, period="6mo", progress=False)
-        if data.empty:
+        data = yf.download(symbol, period=get_fetch_period(period), progress=False)
+        if data is None or data.empty:
             return None
 
+        # Indicators
         data["MA20"] = data["Close"].rolling(20).mean()
         data["MA50"] = data["Close"].rolling(50).mean()
         data["RSI"] = ta.momentum.RSIIndicator(data["Close"]).rsi()
-        data["MACD"] = ta.trend.MACD(data["Close"]).macd_diff()
+        data["MACD_Hist"] = ta.trend.MACD(data["Close"]).macd_diff()
 
         bb = ta.volatility.BollingerBands(data["Close"])
-        data["BBU"] = bb.bollinger_hband()
-        data["BBL"] = bb.bollinger_lband()
+        data["BB_Upper"] = bb.bollinger_hband()
+        data["BB_Lower"] = bb.bollinger_lband()
+
+        data["ATR"] = ta.volatility.AverageTrueRange(
+            data["High"], data["Low"], data["Close"]
+        ).average_true_range()
+
+        data["Volume_Avg20"] = data["Volume"].rolling(20).mean()
+        data["Return"] = data["Close"].pct_change()
+
+        data["OBV"] = ta.volume.OnBalanceVolumeIndicator(
+            data["Close"], data["Volume"]
+        ).on_balance_volume()
+        data["OBV_MA10"] = data["OBV"].rolling(10).mean()
 
         data = data.dropna()
+        data = trim_data(data, period)
+
+        if len(data) < 2:
+            return None
+
         latest = data.iloc[-1]
         prev = data.iloc[-2]
 
-        price = latest["Close"]
-        ma20, ma50 = latest["MA20"], latest["MA50"]
-        rsi = latest["RSI"]
-        macd = latest["MACD"]
-        prev_macd = prev["MACD"]
+        price = float(latest["Close"])
+        rsi = float(latest["RSI"])
+        macd = float(latest["MACD_Hist"])
+        prev_macd = float(prev["MACD_Hist"])
+        ma20 = float(latest["MA20"])
+        ma50 = float(latest["MA50"])
+        bb_upper = float(latest["BB_Upper"])
+        bb_lower = float(latest["BB_Lower"])
+        atr = float(latest["ATR"])
+        vol = float(latest["Volume"])
+        vol_avg = float(latest["Volume_Avg20"])
 
-        # ML Features
-        features = pd.DataFrame([[
-            ma20, ma50, rsi, macd,
-            (price - latest["BBL"]) / (latest["BBU"] - latest["BBL"])
-        ]])
+        # ========================
+        # ML FEATURES (FIXED ✅)
+        # ========================
+        bb_range = bb_upper - bb_lower
+        bb_pband = (price - bb_lower) / bb_range if bb_range > 0 else 0.5
+        atr_ratio = atr / price if price > 0 else 0
+        volume_ratio = vol / vol_avg if vol_avg > 0 else 1
+        return_5d = data["Close"].pct_change(5).iloc[-1]
 
-        pred = model.predict(features)[0]
-        prob = model.predict_proba(features)[0].max()
+        obv_ma10 = float(latest["OBV_MA10"])
+        obv_ratio = float(latest["OBV"]) / abs(obv_ma10) if abs(obv_ma10) > 0 else 1
+
+        features = pd.DataFrame([{
+            "MA20": ma20,
+            "MA50": ma50,
+            "RSI": rsi,
+            "MACD_Hist": macd,
+            "BB_pband": bb_pband,
+            "ATR_ratio": atr_ratio,
+            "Volume_ratio": volume_ratio,
+            "Return": float(latest["Return"]),
+            "Return_5d": return_5d,
+            "OBV_ratio": obv_ratio
+        }])
+
+        pred = model.predict(features.values)[0]
+        prob = model.predict_proba(features.values)[0].max()
         direction = "UP" if pred == 1 else "DOWN"
 
         # ========================
-        # SMART SCORING
+        # PRO SCORE (BALANCED ✅)
         # ========================
         score = 0
 
-        # ML Confidence
-        if prob > 0.8:
-            score += 3 if direction == "UP" else -3
-        elif prob > 0.65:
+        # ML weighting
+        if prob > 0.75:
             score += 2 if direction == "UP" else -2
+        elif prob > 0.6:
+            score += 1 if direction == "UP" else -1
 
         # Trend
         if price > ma20 > ma50:
@@ -115,43 +172,54 @@ def analyze(symbol, model, market_trend):
         elif prev_macd >= 0 and macd < 0:
             score -= 2
 
-        # ========================
-        # MARKET FILTER (POWERFUL 🔥)
-        # ========================
-        if market_trend == "BULL" and score < 0:
-            score += 1  # reduce bearish
-        elif market_trend == "BEAR" and score > 0:
-            score -= 1  # reduce bullish
+        # Bollinger
+        if price <= bb_lower:
+            score += 1
+        elif price >= bb_upper:
+            score -= 1
 
-        # Clamp
+        # Volume
+        if volume_ratio > 1.5:
+            score += 1 if direction == "UP" else -1
+
         score = max(-10, min(10, score))
 
-        # Only strong signals
-        if abs(score) < THRESHOLD:
-            return None
+        # Recommendation
+        if score >= 4: rec = "BUY"
+        elif score <= -4: rec = "SELL"
+        else: rec = "HOLD"
 
         return {
             "stock": symbol,
             "price": round(price, 2),
             "score": score,
-            "rec": "BUY" if score > 0 else "SELL",
-            "conf": round(prob * 100)
+            "rec": rec,
+            "rsi": round(rsi, 2),
+            "conf": round(prob * 100),
+            "target": round(price + atr * 2, 2),
+            "sl": round(price - atr, 2),
         }
 
     except Exception as e:
-        log.warning(f"{symbol} error {e}")
+        log.warning(f"{symbol} error: {e}")
         return None
 
 # ========================
 # TELEGRAM
 # ========================
-def send(msg):
-    users = json.load(open("users.json")) if os.path.exists("users.json") else []
-    for u in users:
+def send_telegram(msg):
+    users_file = os.path.join(BASE_DIR, "users.json")
+    try:
+        users = json.load(open(users_file))
+    except:
+        users = []
+
+    for uid in users:
         try:
             requests.post(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                json={"chat_id": u, "text": msg}
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": uid, "text": msg},
+                timeout=10
             )
         except:
             pass
@@ -160,32 +228,31 @@ def send(msg):
 # MAIN
 # ========================
 def main():
+    log.info("Starting scan...")
+
     if datetime.now().weekday() >= 5:
         return
 
     model = load_model()
     if not model:
-        send("⚠️ Model missing")
+        send_telegram("⚠️ Model missing")
         return
 
-    trend = get_market_trend()
-    log.info(f"Market Trend: {trend}")
+    buys, sells = [], []
 
-    results = []
+    for s in SCANNER_STOCKS:
+        res = analyze_stock(s, model, SCAN_PERIOD)
+        time.sleep(1)
 
-    # ⚡ PARALLEL SCANNING
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(analyze, s, model, trend) for s in STOCKS]
+        if res and abs(res["score"]) >= SCORE_THRESHOLD:
+            log.info(f"{s} → {res['score']} {res['rec']}")
 
-        for f in as_completed(futures):
-            res = f.result()
-            if res:
-                results.append(res)
+            if res["score"] > 0:
+                buys.append(res)
+            else:
+                sells.append(res)
 
-    buys = [r for r in results if r["score"] > 0]
-    sells = [r for r in results if r["score"] < 0]
-
-    msg = f"📊 *Pro AI Alert*\nMarket: {trend}\n\n"
+    msg = "📊 *Stock Alert*\n\n"
 
     if buys:
         msg += "🟢 BUY:\n"
@@ -197,7 +264,9 @@ def main():
         for s in sells:
             msg += f"{s['stock']} ₹{s['price']} ({s['score']})\n"
 
-    send(msg)
+    send_telegram(msg)
+
+    log.info("Done")
 
 # ========================
 if __name__ == "__main__":
