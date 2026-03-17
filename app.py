@@ -637,6 +637,291 @@ def auto_train_model_if_missing():
             st.warning(f"⚠️ Auto-training failed: {e}")
 
 # ========================
+# NSE INDIA DIRECT API
+# Mirrors the stock-nse-india TypeScript library (NseIndia class)
+# ========================
+
+class NseIndiaAPI:
+    """
+    Python equivalent of the stock-nse-india TypeScript NseIndia class.
+    Manages session cookies and exposes the same API surface.
+    """
+    BASE_URL = "https://www.nseindia.com"
+    _session = None
+    _cookie_ts: float = 0
+    COOKIE_TTL = 300  # seconds
+
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": "https://www.nseindia.com/",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    def _refresh_session(self):
+        s = requests.Session()
+        s.headers.update(self.HEADERS)
+        try:
+            s.get(self.BASE_URL, timeout=15)
+            s.get(f"{self.BASE_URL}/market-data/live-equity-market", timeout=10)
+        except Exception:
+            pass
+        self._session = s
+        self._cookie_ts = time.time()
+
+    def _get_session(self):
+        if self._session is None or (time.time() - self._cookie_ts > self.COOKIE_TTL):
+            self._refresh_session()
+        return self._session
+
+    def get_data(self, url: str):
+        """getData: Generic GET with auto-retry on auth failure."""
+        for attempt in range(2):
+            try:
+                session = self._get_session()
+                resp = session.get(url, timeout=15)
+                if resp.status_code in (401, 403):
+                    self._refresh_session()
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception:
+                if attempt == 0:
+                    self._refresh_session()
+        return None
+
+    def get_data_by_endpoint(self, endpoint: str):
+        """getDataByEndpoint."""
+        return self.get_data(f"{self.BASE_URL}/api/{endpoint}")
+
+    # ---- Equity methods (match NseIndia TypeScript class) ----
+
+    def get_equity_details(self, symbol: str):
+        """getEquityDetails: live quote for a symbol."""
+        return self.get_data_by_endpoint(f"quote-equity?symbol={symbol.upper()}")
+
+    def get_equity_trade_info(self, symbol: str):
+        """getEquityTradeInfo: trade info including delivery & circuit limits."""
+        return self.get_data_by_endpoint(
+            f"quote-equity?symbol={symbol.upper()}&section=trade_info"
+        )
+
+    def get_equity_intraday_data(self, symbol: str):
+        """getEquityIntradayData: intraday OHLC candles."""
+        return self.get_data_by_endpoint(
+            f"chart-databyindex?index={symbol.upper()}&indices=false"
+        )
+
+    def get_equity_historical_data(self, symbol: str, from_date: str, to_date: str):
+        """
+        getEquityHistoricalData: daily OHLCV history.
+        Dates must be in DD-MM-YYYY format.
+        """
+        ep = (
+            f"historical/cm/equity?symbol={symbol.upper()}"
+            f"&series[]=EQ&from={from_date}&to={to_date}"
+        )
+        return self.get_data_by_endpoint(ep)
+
+    def get_equity_option_chain(self, symbol: str):
+        """getEquityOptionChain."""
+        return self.get_data_by_endpoint(f"option-chain-equities?symbol={symbol.upper()}")
+
+    def get_equity_stock_indices(self, index: str):
+        """getEquityStockIndices."""
+        return self.get_data_by_endpoint(f"equity-stockIndices?index={index}")
+
+    def get_equity_series(self, symbol: str):
+        """getEquitySeries."""
+        return self.get_data_by_endpoint(f"equity-meta-info?symbol={symbol.upper()}")
+
+    def get_all_indices(self):
+        """getAllIndices."""
+        return self.get_data_by_endpoint("allIndices")
+
+    def get_index_names(self):
+        """getIndexNames."""
+        return self.get_data_by_endpoint("index-names")
+
+    def get_index_intraday_data(self, index: str):
+        """getIndexIntradayData."""
+        return self.get_data_by_endpoint(f"chart-databyindex?index={index}&indices=true")
+
+    def get_index_option_chain(self, index_symbol: str, expiry: str = None):
+        """getIndexOptionChain. Optional expiry in DD-MMM-YYYY format."""
+        ep = f"option-chain-indices?symbol={index_symbol}"
+        if expiry:
+            ep += f"&expiry={expiry}"
+        return self.get_data_by_endpoint(ep)
+
+    def get_index_option_chain_contract_info(self, index_symbol: str):
+        """getIndexOptionChainContractInfo."""
+        return self.get_data_by_endpoint(
+            f"option-chain-indices?symbol={index_symbol}"
+        )
+
+    def get_market_status(self):
+        """getMarketStatus."""
+        return self.get_data_by_endpoint("marketStatus")
+
+    def get_market_turnover(self):
+        """getMarketTurnover."""
+        return self.get_data_by_endpoint("market-turnover")
+
+    def get_pre_open_market_data(self):
+        """getPreOpenMarketData."""
+        return self.get_data_by_endpoint("market-data-pre-open?key=ALL")
+
+    def get_all_stock_symbols(self):
+        """getAllStockSymbols."""
+        return self.get_data_by_endpoint("equity-master")
+
+    def get_equity_master(self):
+        """getEquityMaster."""
+        return self.get_data_by_endpoint("equity-master")
+
+    def get_trading_holidays(self):
+        """getTradingHolidays."""
+        return self.get_data_by_endpoint("holiday-master?type=trading")
+
+    def get_clearing_holidays(self):
+        """getClearingHolidays."""
+        return self.get_data_by_endpoint("holiday-master?type=clearing")
+
+    def get_glossary(self):
+        """getGlossary."""
+        return self.get_data_by_endpoint("cmsContent?url=/glossary")
+
+    def get_circulars(self):
+        """getCirculars."""
+        return self.get_data_by_endpoint("circulars")
+
+    def get_latest_circulars(self):
+        """getLatestCirculars."""
+        return self.get_data_by_endpoint("latest-circular")
+
+
+# Singleton — one session shared across Streamlit reruns
+_nse_api = NseIndiaAPI()
+
+
+@st.cache_data(ttl=60)
+def nse_get_equity_details(symbol_clean: str):
+    """
+    getEquityDetails wrapper — returns live price info dict.
+    Falls back gracefully to None if the API is unavailable.
+    """
+    try:
+        raw = _nse_api.get_equity_details(symbol_clean)
+        if not raw:
+            return None
+        pi = raw.get("priceInfo", {})
+        intra = pi.get("intraDayHighLow", {})
+        wk52 = pi.get("weekHighLow", {})
+        return {
+            "lastPrice": float(pi.get("lastPrice", 0) or 0),
+            "open": float(pi.get("open", 0) or 0),
+            "prevClose": float(pi.get("close", 0) or 0),
+            "high": float(intra.get("max", 0) or 0),
+            "low": float(intra.get("min", 0) or 0),
+            "change": float(pi.get("change", 0) or 0),
+            "pChange": float(pi.get("pChange", 0) or 0),
+            "vwap": float(pi.get("vwap", 0) or 0),
+            "week52High": float(wk52.get("max", 0) or 0),
+            "week52Low": float(wk52.get("min", 0) or 0),
+        }
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300)
+def nse_get_equity_history(symbol_clean: str, days: int = 200):
+    """
+    getEquityHistoricalData wrapper — returns a DataFrame with OHLCV columns.
+    Date index is sorted ascending. Returns None on failure (caller falls back to yfinance).
+    """
+    try:
+        to_date = datetime.now().strftime("%d-%m-%Y")
+        buffer_days = int(days * 1.6)  # account for weekends/holidays
+        from_date = (datetime.now() - timedelta(days=buffer_days)).strftime("%d-%m-%Y")
+
+        raw = _nse_api.get_equity_historical_data(symbol_clean, from_date, to_date)
+        if not raw or "data" not in raw:
+            return None
+
+        rows = []
+        for rec in raw["data"]:
+            try:
+                date_str = rec.get("CH_TIMESTAMP") or rec.get("mTIMESTAMP")
+                rows.append({
+                    "Date": pd.to_datetime(date_str),
+                    "Open": float(rec.get("CH_OPENING_PRICE") or 0),
+                    "High": float(rec.get("CH_TRADE_HIGH_PRICE") or 0),
+                    "Low": float(rec.get("CH_TRADE_LOW_PRICE") or 0),
+                    "Close": float(rec.get("CH_CLOSING_PRICE") or 0),
+                    "Volume": float(rec.get("CH_TOTAL_TRADED_QUANTITY") or 0),
+                })
+            except Exception:
+                continue
+
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values("Date").set_index("Date")
+        df = df[df["Close"] > 0].tail(days)
+        return df
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=60)
+def nse_get_market_status():
+    """getMarketStatus wrapper — returns dict with isOpen, status, tradeDate."""
+    try:
+        raw = _nse_api.get_market_status()
+        if not raw:
+            return None
+        for m in raw.get("marketState", []):
+            if m.get("market") == "Capital Market":
+                return {
+                    "isOpen": m.get("marketStatus") == "Open",
+                    "status": m.get("marketStatus", "Unknown"),
+                    "tradeDate": m.get("tradeDate", ""),
+                }
+        return None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=60)
+def nse_get_all_indices():
+    """getAllIndices wrapper — returns list of index dicts."""
+    try:
+        raw = _nse_api.get_all_indices()
+        return raw.get("data") if raw else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=60)
+def nse_get_pre_open_data():
+    """getPreOpenMarketData wrapper."""
+    try:
+        raw = _nse_api.get_pre_open_market_data()
+        return raw.get("data") if raw else None
+    except Exception:
+        return None
+
+
+# ========================
 # NSE INDIA DATA HELPERS
 # ========================
 
@@ -907,11 +1192,11 @@ def get_swing_expiry_date(period):
         "1wk": 7,
         "1mo": 30,
         "2mo": 60,
-        "3mo": 90,
+        "3mo": 30,
         "6mo": 180,
         "1y": 365,
     }
-    days = day_map.get(period, 90)
+    days = day_map.get(period, 30)
     expiry_dt = datetime.now() + timedelta(days=days)
     return expiry_dt.strftime("%d-%b-%Y")
 
@@ -990,19 +1275,57 @@ def get_nse_nearest_option_expiry(symbol_clean):
 def detect_swing_signals(symbol, period="6mo"):
     """
     Detect swing trading signals for a stock.
-    Returns a dict with signal type, strength, and details.
+    Uses NSE India direct API (stock-nse-india equivalent) for fresh data,
+    with a yfinance fallback for non-NSE symbols.
+    Returns a dict with signal type, strength, details, and live price.
     """
     try:
-        fetch_period = get_fetch_period(period)
-        data = yf.download(symbol.upper(), period=fetch_period, progress=False)
+        symbol_clean = symbol.upper().replace(".NS", "").replace(".BO", "")
+
+        # Period → minimum required bars for indicators (~200 bars is enough for all periods)
+        period_days = {
+            "1wk": 200, "1mo": 200, "2mo": 200,
+            "3mo": 200, "6mo": 200, "1y": 400,
+        }
+        hist_days = period_days.get(period, 200)
+
+        # --- Step 1: fetch history via NSE India API (getEquityHistoricalData) ---
+        data = nse_get_equity_history(symbol_clean, days=hist_days)
+        data_source = "NSE"
 
         if data is None or data.empty:
-            return None
+            # Fallback to yfinance
+            fetch_period = get_fetch_period(period)
+            data = yf.download(symbol.upper(), period=fetch_period, progress=False)
+            data_source = "yfinance"
 
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
+            if data is None or data.empty:
+                return None
+
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.droplevel(1)
+
+        # --- Step 2: fetch live quote via NSE India API (getEquityDetails) ---
+        live_quote = nse_get_equity_details(symbol_clean)
+        live_price = None
+        live_change_pct = None
+        if live_quote and live_quote.get("lastPrice", 0) > 0:
+            live_price = live_quote["lastPrice"]
+            live_change_pct = live_quote.get("pChange")
 
         # Technical indicators
+        data["MA20"] = data["Close"].rolling(20).mean()
+        data["MA50"] = data["Close"].rolling(50).mean()
+
+        rsi_indicator = ta.momentum.RSIIndicator(close=data["Close"].squeeze(), window=14)
+        data["RSI"] = rsi_indicator.rsi()
+
+        macd_indicator = ta.trend.MACD(close=data["Close"].squeeze())
+        data["MACD"] = macd_indicator.macd()
+        data["MACD_Signal"] = macd_indicator.macd_signal()
+        data["MACD_Hist"] = macd_indicator.macd_diff()
+
+        # --- Step 3: compute technical indicators ---
         data["MA20"] = data["Close"].rolling(20).mean()
         data["MA50"] = data["Close"].rolling(50).mean()
 
@@ -1033,7 +1356,14 @@ def detect_swing_signals(symbol, period="6mo"):
 
         latest = data.iloc[-1]
         prev = data.iloc[-2]
-        close = latest["Close"].item()
+        data_date = data.index[-1].strftime("%d %b %Y")
+
+        # Historical close (last candle from OHLCV data)
+        hist_close = float(latest["Close"].item() if hasattr(latest["Close"], "item") else latest["Close"])
+
+        # Use live NSE price if available, otherwise use historical close
+        close = live_price if live_price and live_price > 0 else hist_close
+
         rsi_val = latest["RSI"].item()
         ma20 = latest["MA20"].item()
         ma50 = latest["MA50"].item()
@@ -1061,7 +1391,7 @@ def detect_swing_signals(symbol, period="6mo"):
 
         # Recent price momentum (5-bar return)
         if len(data) >= 6:
-            recent_close_5 = data.iloc[-6]["Close"].item()
+            recent_close_5 = float(data.iloc[-6]["Close"].item() if hasattr(data.iloc[-6]["Close"], "item") else data.iloc[-6]["Close"])
             recent_return_pct = ((close - recent_close_5) / recent_close_5) * 100
         else:
             recent_return_pct = 0
@@ -1268,6 +1598,10 @@ def detect_swing_signals(symbol, period="6mo"):
         return {
             "stock": symbol.upper(),
             "close": round(close, 2),
+            "hist_close": round(hist_close, 2),
+            "live_price": round(live_price, 2) if live_price else None,
+            "live_change_pct": round(live_change_pct, 2) if live_change_pct is not None else None,
+            "data_source": data_source,
             "swing_type": swing_type,
             "color": color,
             "score": score,
@@ -1287,6 +1621,7 @@ def detect_swing_signals(symbol, period="6mo"):
             "nse_data": nse_data,
             "tech_score": tech_score,
             "market_score": capped_market,
+            "data_date": data_date,
         }
 
     except Exception as e:
@@ -1386,7 +1721,7 @@ def safe_download(symbol, period="5y"):
                     time.sleep(0.6 * (attempt + 1))
 
     return None
-def analyze_stock_data(symbol, period="3mo"):
+def analyze_stock_data(symbol, period="1mo"):
     """Analyze a single stock"""
     try:
         if model is None:
@@ -1827,7 +2162,7 @@ if page == "Single Stock Analysis":
         period = st.selectbox(
             "Time Period",
             ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
-            index=1
+            index=0
         )
 
     if st.button("Analyze Stock", key="analyze_btn"):
@@ -1926,12 +2261,20 @@ elif page == "Swing Trading Alerts":
             default=["STRONG BUY", "BUY", "SELL", "STRONG SELL"]
         )
     with col_b:
-        scan_period = st.selectbox("Scan Period", ["1wk", "1mo", "2mo", "3mo", "6mo", "1y"], index=3)
+        scan_period = st.selectbox("Scan Period", ["1wk", "1mo", "2mo", "3mo", "6mo", "1y"], index=1)
 
     if st.button("🔍 Scan for Swing Trades", type="primary"):
         swing_results = []
         progress = st.progress(0)
         status = st.empty()
+
+        # Show current market status before scan
+        mkt_status = nse_get_market_status()
+        if mkt_status:
+            mkt_label = "🟢 Market Open" if mkt_status["isOpen"] else "🔴 Market Closed"
+            st.info(f"{mkt_label} — Trade Date: {mkt_status.get('tradeDate', 'N/A')}  |  Data: NSE India API (live)")
+        else:
+            st.info("📡 Fetching data from NSE India API…")
 
         total = len(SCANNER_STOCKS)
         max_workers = min(12, max(4, (os.cpu_count() or 4) * 2))
@@ -1987,7 +2330,19 @@ elif page == "Swing Trading Alerts":
 
                     with header_col:
                         st.subheader(f"{res['stock']}")
-                        st.caption(f"Close: ₹{res['close']}  |  ATR: {res['atr']}  |  Volume: {res['volume_ratio']}x avg")
+                        # Build live price label
+                        live_p = res.get("live_price")
+                        live_chg = res.get("live_change_pct")
+                        src = res.get("data_source", "NSE")
+                        if live_p:
+                            chg_str = f" ({live_chg:+.2f}%)" if live_chg is not None else ""
+                            price_label = f"🟡 Live: ₹{live_p}{chg_str}  |  Hist Close: ₹{res.get('hist_close', res['close'])}"
+                        else:
+                            price_label = f"Close: ₹{res['close']}"
+                        st.caption(
+                            f"{price_label}  |  ATR: {res['atr']}  |  Volume: {res['volume_ratio']}x avg"
+                            f"  |  📅 Data: {res.get('data_date', 'N/A')} [{src}]"
+                        )
 
                     with badge_col:
                         if "BUY" in res["swing_type"]:
@@ -2002,9 +2357,11 @@ elif page == "Swing Trading Alerts":
 
                     # Metrics row
                     m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("RSI", res["rsi"])
+                    live_display = f"₹{res['live_price']}" if res.get("live_price") else f"₹{res['close']}"
+                    live_delta = f"{res['live_change_pct']:+.2f}%" if res.get("live_change_pct") is not None else None
+                    m1.metric("Live Price" if res.get("live_price") else "Close", live_display, live_delta)
                     m2.metric("MA20", f"₹{res['ma20']}")
-                    m3.metric("MA50", f"₹{res['ma50']}")
+                    m3.metric("RSI", res["rsi"])
                     m4.metric("Tech Score", f"{res.get('tech_score', res['score']):+d}")
                     m5.metric("Total Score", f"{res['score']:+d}", f"Mkt: {res.get('market_score', 0):+d}")
 
@@ -2033,15 +2390,17 @@ elif page == "Swing Trading Alerts":
                             nc4.metric("FII Net OI", format_crore(fii_oi["net"]), "Long" if fii_oi["net"] > 0 else "Short")
 
                     # Trade plan
+                    # Trade plan — entry uses live price when available
+                    entry_price = res.get("live_price") or res["close"]
                     st.markdown("**📋 Swing Trade Plan:**")
                     tp1, tp2, tp3, tp4 = st.columns(4)
                     if "BUY" in res["swing_type"]:
-                        tp1.metric("Entry Price", f"₹{res['close']}")
+                        tp1.metric("Entry Price", f"₹{entry_price}")
                         tp2.metric("Target (Up)", f"₹{res['swing_target_up']}")
                         tp3.metric("Stop Loss", f"₹{res['stop_loss_long']}")
                         tp4.metric("Expiry Date", res.get("expiry_date", "N/A"))
                     elif "SELL" in res["swing_type"]:
-                        tp1.metric("Entry Price", f"₹{res['close']}")
+                        tp1.metric("Entry Price", f"₹{entry_price}")
                         tp2.metric("Target (Down)", f"₹{res['swing_target_down']}")
                         tp3.metric("Stop Loss", f"₹{res['stop_loss_short']}")
                         tp4.metric("Expiry Date", res.get("expiry_date", "N/A"))
@@ -2051,7 +2410,7 @@ elif page == "Swing Trading Alerts":
                         tp3.metric("Expiry Date", res.get("expiry_date", "N/A"))
                         tp4.metric("Signal", res["swing_type"])
 
-                    st.caption(f"Expiry Source: {res.get('expiry_source', 'Estimated')}")
+                    st.caption(f"Expiry Source: {res.get('expiry_source', 'Estimated')}  |  Price Source: {'NSE Live' if res.get('live_price') else res.get('data_source', 'NSE')}")
 
 # ========================
 # PAGE: MARKET SCANNER
@@ -2302,7 +2661,7 @@ elif page == "Email Alerts":
         alert_threshold = st.slider("Score threshold (absolute)", min_value=4, max_value=10, value=6,
                                      help="Alert when |score| ≥ this value")
     with ecol4:
-        alert_period = st.selectbox("Scan Period", ["1wk", "1mo", "3mo", "6mo"], index=2, key="alert_period")
+        alert_period = st.selectbox("Scan Period", ["1wk", "1mo", "3mo", "6mo"], index=1, key="alert_period")
 
     include_swing = st.checkbox("Include Swing Trading signals", value=True)
 
