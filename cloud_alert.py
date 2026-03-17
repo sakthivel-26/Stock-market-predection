@@ -1,8 +1,8 @@
 """
-Cloud Auto Alert — FINAL FIXED VERSION (PRO STABLE)
+AI Stock Alert — FINAL VERSION (Clean UI + Stable)
 """
 
-import os, sys, json, time, logging
+import os, json, time, logging
 from datetime import datetime
 import yfinance as yf
 import pandas as pd
@@ -17,11 +17,8 @@ load_dotenv()
 # CONFIG
 # ========================
 TOKEN = os.getenv("TG_BOT_TOKEN")
-SCORE_THRESHOLD = 4
-SCAN_PERIOD = "3mo"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = "./stock_model.pkl"
+SCORE_THRESHOLD = 2   # lower for daily signals
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -41,7 +38,7 @@ def load_model():
     return joblib.load(MODEL_PATH)
 
 # ========================
-# ANALYSIS (FIXED)
+# ANALYSIS
 # ========================
 def analyze(symbol, model):
     try:
@@ -50,11 +47,11 @@ def analyze(symbol, model):
         if data is None or data.empty:
             return None
 
-        # 🔥 FIX MultiIndex
+        # Fix MultiIndex
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.droplevel(1)
 
-        # 🔥 FIX 1D issue
+        # Fix 1D
         close = data["Close"].squeeze()
         high = data["High"].squeeze()
         low = data["Low"].squeeze()
@@ -75,15 +72,6 @@ def analyze(symbol, model):
             high=high, low=low, close=close
         ).average_true_range()
 
-        data["Volume_Avg20"] = volume.rolling(20).mean()
-        data["Return"] = close.pct_change()
-
-        data["OBV"] = ta.volume.OnBalanceVolumeIndicator(
-            close=close, volume=volume
-        ).on_balance_volume()
-
-        data["OBV_MA10"] = data["OBV"].rolling(10).mean()
-
         data = data.dropna()
 
         if len(data) < 2:
@@ -92,7 +80,6 @@ def analyze(symbol, model):
         latest = data.iloc[-1]
         prev = data.iloc[-2]
 
-        # Values
         price = float(latest["Close"])
         rsi = float(latest["RSI"])
         macd = float(latest["MACD"])
@@ -102,49 +89,11 @@ def analyze(symbol, model):
         bbu = float(latest["BBU"])
         bbl = float(latest["BBL"])
         atr = float(latest["ATR"])
-        vol = float(latest["Volume"])
-        vol_avg = float(latest["Volume_Avg20"])
 
         # ========================
-        # ML FEATURES (SAFE)
-        # ========================
-        bb_range = bbu - bbl
-        bb_pband = (price - bbl) / bb_range if bb_range > 0 else 0.5
-        atr_ratio = atr / price if price > 0 else 0
-        vol_ratio = vol / vol_avg if vol_avg > 0 else 1
-        return_5d = close.pct_change(5).iloc[-1]
-
-        obv_ma = float(latest["OBV_MA10"])
-        obv_ratio = float(latest["OBV"]) / abs(obv_ma) if abs(obv_ma) > 0 else 1
-
-        features = pd.DataFrame([{
-            "MA20": ma20,
-            "MA50": ma50,
-            "RSI": rsi,
-            "MACD_Hist": macd,
-            "BB_pband": bb_pband,
-            "ATR_ratio": atr_ratio,
-            "Volume_ratio": vol_ratio,
-            "Return": float(latest["Return"]),
-            "Return_5d": return_5d,
-            "OBV_ratio": obv_ratio
-        }])
-
-        # ML
-        pred = model.predict(features.values)[0]
-        prob = model.predict_proba(features.values)[0].max()
-        direction = "UP" if pred == 1 else "DOWN"
-
-        # ========================
-        # SCORING
+        # SCORING LOGIC
         # ========================
         score = 0
-
-        # ML confidence
-        if prob > 0.75:
-            score += 2 if direction == "UP" else -2
-        elif prob > 0.6:
-            score += 1 if direction == "UP" else -1
 
         # Trend
         if price > ma20 > ma50:
@@ -159,9 +108,9 @@ def analyze(symbol, model):
             score -= 2
 
         # MACD
-        if prev_macd <= 0 and macd > 0:
+        if prev_macd < 0 and macd > 0:
             score += 2
-        elif prev_macd >= 0 and macd < 0:
+        elif prev_macd > 0 and macd < 0:
             score -= 2
 
         # Bollinger
@@ -169,10 +118,6 @@ def analyze(symbol, model):
             score += 1
         elif price >= bbu:
             score -= 1
-
-        # Volume
-        if vol_ratio > 1.5:
-            score += 1 if direction == "UP" else -1
 
         score = max(-10, min(10, score))
 
@@ -184,7 +129,7 @@ def analyze(symbol, model):
             "price": round(price, 2),
             "score": score,
             "rec": "BUY" if score > 0 else "SELL",
-            "conf": round(prob * 100),
+            "rsi": round(rsi, 2),
             "target": round(price + atr * 2, 2),
             "sl": round(price - atr, 2),
         }
@@ -203,7 +148,7 @@ def send(msg):
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                json={"chat_id": u, "text": msg},
+                json={"chat_id": u, "text": msg, "parse_mode": "Markdown"},
                 timeout=10
             )
         except:
@@ -237,19 +182,44 @@ def main():
             else:
                 sells.append(res)
 
-    msg = "📊 *AI Stock Alert*\n\n"
+    # ========================
+    # CLEAN TELEGRAM UI
+    # ========================
+    now = datetime.now().strftime("%d %b %I:%M %p")
+
+    msg = f"📊 *AI Stock Alert*\n🕒 {now}\n\n"
 
     if buys:
-        msg += "🟢 BUY:\n"
+        msg += "🟢 *BUY SIGNALS*\n"
+        msg += "━━━━━━━━━━━━━━\n\n"
+
         for b in buys:
-            msg += f"{b['stock']} ₹{b['price']} ({b['score']})\n"
+            msg += (
+                f"📈 *{b['stock']}*\n"
+                f"💰 Price: ₹{b['price']}\n"
+                f"📊 Score: *+{b['score']}*\n"
+                f"📈 RSI: {b['rsi']}\n\n"
+            )
 
     if sells:
-        msg += "\n🔴 SELL:\n"
+        msg += "\n🔴 *SELL SIGNALS*\n"
+        msg += "━━━━━━━━━━━━━━\n\n"
+
         for s in sells:
-            msg += f"{s['stock']} ₹{s['price']} ({s['score']})\n"
+            msg += (
+                f"📉 *{s['stock']}*\n"
+                f"💰 Price: ₹{s['price']}\n"
+                f"📊 Score: *{s['score']}*\n"
+                f"📉 RSI: {s['rsi']}\n\n"
+            )
+
+    if not buys and not sells:
+        msg += "⚠️ No strong signals today\nMarket is sideways or weak\n"
+
+    msg += "━━━━━━━━━━━━━━\n🤖 _AI Stock Analyzer |powered by S H A K T H I ❤️_"
 
     send(msg)
+
     log.info("Done")
 
 # ========================
