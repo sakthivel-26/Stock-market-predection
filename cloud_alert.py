@@ -1,14 +1,13 @@
 """
-AI Stock Alert — FINAL VERSION (Clean UI + Stable)
+AI Stock Alert — FINAL PRO VERSION (NSE + Indicators + Clean UI)
 """
 
-import os, json, time, logging
+import os, json, time, logging, requests
 from datetime import datetime
 import yfinance as yf
 import pandas as pd
 import ta
 import joblib
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,7 +17,7 @@ load_dotenv()
 # ========================
 TOKEN = os.getenv("TG_BOT_TOKEN")
 MODEL_PATH = "./stock_model.pkl"
-SCORE_THRESHOLD = 2   # lower for daily signals
+SCORE_THRESHOLD = 2
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -29,11 +28,31 @@ STOCKS = [
 ]
 
 # ========================
+# NSE API
+# ========================
+def get_nse_data(symbol):
+    try:
+        url = f"https://www.nseindia.com/api/quote-equity?symbol={symbol}"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers)
+        response = session.get(url, headers=headers)
+
+        return response.json()
+    except:
+        return None
+
+# ========================
 # LOAD MODEL
 # ========================
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        log.error("Model missing!")
+        log.warning("Model missing")
         return None
     return joblib.load(MODEL_PATH)
 
@@ -57,20 +76,23 @@ def analyze(symbol, model):
         low = data["Low"].squeeze()
         volume = data["Volume"].squeeze()
 
-        # Indicators
+        # ========================
+        # INDICATORS
+        # ========================
         data["MA20"] = close.rolling(20).mean()
         data["MA50"] = close.rolling(50).mean()
 
-        data["RSI"] = ta.momentum.RSIIndicator(close=close).rsi()
-        data["MACD"] = ta.trend.MACD(close=close).macd_diff()
+        data["RSI"] = ta.momentum.RSIIndicator(close).rsi()
+        data["MACD"] = ta.trend.MACD(close).macd_diff()
 
-        bb = ta.volatility.BollingerBands(close=close)
+        data["ADX"] = ta.trend.ADXIndicator(high, low, close).adx()
+        data["CCI"] = ta.trend.CCIIndicator(high, low, close).cci()
+        data["MFI"] = ta.volume.MFIIndicator(high, low, close, volume).money_flow_index()
+        data["ROC"] = ta.momentum.ROCIndicator(close).roc()
+
+        bb = ta.volatility.BollingerBands(close)
         data["BBU"] = bb.bollinger_hband()
         data["BBL"] = bb.bollinger_lband()
-
-        data["ATR"] = ta.volatility.AverageTrueRange(
-            high=high, low=low, close=close
-        ).average_true_range()
 
         data = data.dropna()
 
@@ -81,42 +103,61 @@ def analyze(symbol, model):
         prev = data.iloc[-2]
 
         price = float(latest["Close"])
-        rsi = float(latest["RSI"])
-        macd = float(latest["MACD"])
-        prev_macd = float(prev["MACD"])
-        ma20 = float(latest["MA20"])
-        ma50 = float(latest["MA50"])
-        bbu = float(latest["BBU"])
-        bbl = float(latest["BBL"])
-        atr = float(latest["ATR"])
 
         # ========================
-        # SCORING LOGIC
+        # NSE DATA (OPTIONAL)
+        # ========================
+        nse = get_nse_data(symbol.replace(".NS", ""))
+
+        # ========================
+        # SCORING
         # ========================
         score = 0
 
         # Trend
-        if price > ma20 > ma50:
+        if price > latest["MA20"] > latest["MA50"]:
             score += 2
-        elif price < ma20 < ma50:
+        elif price < latest["MA20"] < latest["MA50"]:
             score -= 2
 
         # RSI
-        if rsi < 30:
+        if latest["RSI"] < 30:
             score += 2
-        elif rsi > 70:
+        elif latest["RSI"] > 70:
             score -= 2
 
         # MACD
-        if prev_macd < 0 and macd > 0:
+        if prev["MACD"] < 0 and latest["MACD"] > 0:
             score += 2
-        elif prev_macd > 0 and macd < 0:
+        elif prev["MACD"] > 0 and latest["MACD"] < 0:
             score -= 2
 
-        # Bollinger
-        if price <= bbl:
+        # ADX
+        if latest["ADX"] > 25:
             score += 1
-        elif price >= bbu:
+
+        # CCI
+        if latest["CCI"] > 100:
+            score += 1
+        elif latest["CCI"] < -100:
+            score -= 1
+
+        # MFI
+        if latest["MFI"] < 20:
+            score += 1
+        elif latest["MFI"] > 80:
+            score -= 1
+
+        # ROC
+        if latest["ROC"] > 0:
+            score += 1
+        else:
+            score -= 1
+
+        # Bollinger
+        if price <= latest["BBL"]:
+            score += 1
+        elif price >= latest["BBU"]:
             score -= 1
 
         score = max(-10, min(10, score))
@@ -128,10 +169,7 @@ def analyze(symbol, model):
             "stock": symbol,
             "price": round(price, 2),
             "score": score,
-            "rec": "BUY" if score > 0 else "SELL",
-            "rsi": round(rsi, 2),
-            "target": round(price + atr * 2, 2),
-            "sl": round(price - atr, 2),
+            "rsi": round(latest["RSI"], 2)
         }
 
     except Exception as e:
@@ -148,8 +186,7 @@ def send(msg):
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                json={"chat_id": u, "text": msg, "parse_mode": "Markdown"},
-                timeout=10
+                json={"chat_id": u, "text": msg, "parse_mode": "Markdown"}
             )
         except:
             pass
@@ -158,15 +195,12 @@ def send(msg):
 # MAIN
 # ========================
 def main():
-    log.info("Starting scan...")
+    log.info("Running scan...")
 
     if datetime.now().weekday() >= 5:
         return
 
     model = load_model()
-    if not model:
-        send("⚠️ Model missing")
-        return
 
     buys, sells = [], []
 
@@ -175,24 +209,18 @@ def main():
         time.sleep(1)
 
         if res:
-            log.info(f"{s} → {res['score']} {res['rec']}")
-
             if res["score"] > 0:
                 buys.append(res)
             else:
                 sells.append(res)
 
-    # ========================
-    # CLEAN TELEGRAM UI
-    # ========================
     now = datetime.now().strftime("%d %b %I:%M %p")
 
     msg = f"📊 *AI Stock Alert*\n🕒 {now}\n\n"
 
+    # BUY
     if buys:
-        msg += "🟢 *BUY SIGNALS*\n"
-        msg += "━━━━━━━━━━━━━━\n\n"
-
+        msg += "🟢 *BUY SIGNALS*\n━━━━━━━━━━━━━━\n\n"
         for b in buys:
             msg += (
                 f"📈 *{b['stock']}*\n"
@@ -201,10 +229,9 @@ def main():
                 f"📈 RSI: {b['rsi']}\n\n"
             )
 
+    # SELL
     if sells:
-        msg += "\n🔴 *SELL SIGNALS*\n"
-        msg += "━━━━━━━━━━━━━━\n\n"
-
+        msg += "\n🔴 *SELL SIGNALS*\n━━━━━━━━━━━━━━\n\n"
         for s in sells:
             msg += (
                 f"📉 *{s['stock']}*\n"
@@ -213,14 +240,13 @@ def main():
                 f"📉 RSI: {s['rsi']}\n\n"
             )
 
+    # No signals
     if not buys and not sells:
-        msg += "⚠️ No strong signals today\nMarket is sideways or weak\n"
+        msg += "⚠️ No strong signals today\n"
 
-    msg += "━━━━━━━━━━━━━━\n🤖 _AI Stock Analyzer |powered by S H A K T H I ❤️_"
+    msg += "━━━━━━━━━━━━━━\n🤖 _AI Stock Analyzer ❤️_"
 
     send(msg)
-
-    log.info("Done")
 
 # ========================
 if __name__ == "__main__":
