@@ -1,16 +1,11 @@
 """
-Cloud Auto Alert — FIXED VERSION
+Cloud Auto Alert — FINAL FIXED VERSION (PRO STABLE)
 """
 
-import os
-import sys
-import json
-import logging
+import os, sys, json, time, logging
 from datetime import datetime
-import time
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import ta
 import joblib
 import requests
@@ -21,41 +16,24 @@ load_dotenv()
 # ========================
 # CONFIG
 # ========================
-TELEGRAM_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-
-SCORE_THRESHOLD = 4   # ✅ reduced (important fix)
+TOKEN = os.getenv("TG_BOT_TOKEN")
+SCORE_THRESHOLD = 4
 SCAN_PERIOD = "3mo"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = "./stock_model.pkl"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.join(BASE_DIR, "cloud_alert.log")),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-SCANNER_STOCKS = [
+STOCKS = [
     "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
     "SBIN.NS","LT.NS","WIPRO.NS","BHARTIARTL.NS","ITC.NS"
 ]
 
 # ========================
-# HELPERS
+# LOAD MODEL
 # ========================
-def get_fetch_period(period):
-    return {"1wk": "6mo","1mo": "6mo","2mo": "6mo","3mo": "6mo",
-            "6mo": "6mo","1y": "1y","2y": "2y","5y": "5y"}.get(period, period)
-
-def trim_data(data, period):
-    rows = {"1wk":5,"1mo":22,"2mo":44,"3mo":66,
-            "6mo":132,"1y":252,"2y":504,"5y":1260}.get(period)
-    return data.tail(rows) if rows else data
-
 def load_model():
     if not os.path.exists(MODEL_PATH):
         log.error("Model missing!")
@@ -63,38 +41,50 @@ def load_model():
     return joblib.load(MODEL_PATH)
 
 # ========================
-# ANALYSIS
+# ANALYSIS (FIXED)
 # ========================
-def analyze_stock(symbol, model, period):
+def analyze(symbol, model):
     try:
-        data = yf.download(symbol, period=get_fetch_period(period), progress=False)
+        data = yf.download(symbol, period="6mo", progress=False)
+
         if data is None or data.empty:
             return None
 
-        # Indicators
-        data["MA20"] = data["Close"].rolling(20).mean()
-        data["MA50"] = data["Close"].rolling(50).mean()
-        data["RSI"] = ta.momentum.RSIIndicator(data["Close"]).rsi()
-        data["MACD_Hist"] = ta.trend.MACD(data["Close"]).macd_diff()
+        # 🔥 FIX MultiIndex
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
 
-        bb = ta.volatility.BollingerBands(data["Close"])
-        data["BB_Upper"] = bb.bollinger_hband()
-        data["BB_Lower"] = bb.bollinger_lband()
+        # 🔥 FIX 1D issue
+        close = data["Close"].squeeze()
+        high = data["High"].squeeze()
+        low = data["Low"].squeeze()
+        volume = data["Volume"].squeeze()
+
+        # Indicators
+        data["MA20"] = close.rolling(20).mean()
+        data["MA50"] = close.rolling(50).mean()
+
+        data["RSI"] = ta.momentum.RSIIndicator(close=close).rsi()
+        data["MACD"] = ta.trend.MACD(close=close).macd_diff()
+
+        bb = ta.volatility.BollingerBands(close=close)
+        data["BBU"] = bb.bollinger_hband()
+        data["BBL"] = bb.bollinger_lband()
 
         data["ATR"] = ta.volatility.AverageTrueRange(
-            data["High"], data["Low"], data["Close"]
+            high=high, low=low, close=close
         ).average_true_range()
 
-        data["Volume_Avg20"] = data["Volume"].rolling(20).mean()
-        data["Return"] = data["Close"].pct_change()
+        data["Volume_Avg20"] = volume.rolling(20).mean()
+        data["Return"] = close.pct_change()
 
         data["OBV"] = ta.volume.OnBalanceVolumeIndicator(
-            data["Close"], data["Volume"]
+            close=close, volume=volume
         ).on_balance_volume()
+
         data["OBV_MA10"] = data["OBV"].rolling(10).mean()
 
         data = data.dropna()
-        data = trim_data(data, period)
 
         if len(data) < 2:
             return None
@@ -102,29 +92,30 @@ def analyze_stock(symbol, model, period):
         latest = data.iloc[-1]
         prev = data.iloc[-2]
 
+        # Values
         price = float(latest["Close"])
         rsi = float(latest["RSI"])
-        macd = float(latest["MACD_Hist"])
-        prev_macd = float(prev["MACD_Hist"])
+        macd = float(latest["MACD"])
+        prev_macd = float(prev["MACD"])
         ma20 = float(latest["MA20"])
         ma50 = float(latest["MA50"])
-        bb_upper = float(latest["BB_Upper"])
-        bb_lower = float(latest["BB_Lower"])
+        bbu = float(latest["BBU"])
+        bbl = float(latest["BBL"])
         atr = float(latest["ATR"])
         vol = float(latest["Volume"])
         vol_avg = float(latest["Volume_Avg20"])
 
         # ========================
-        # ML FEATURES (FIXED ✅)
+        # ML FEATURES (SAFE)
         # ========================
-        bb_range = bb_upper - bb_lower
-        bb_pband = (price - bb_lower) / bb_range if bb_range > 0 else 0.5
+        bb_range = bbu - bbl
+        bb_pband = (price - bbl) / bb_range if bb_range > 0 else 0.5
         atr_ratio = atr / price if price > 0 else 0
-        volume_ratio = vol / vol_avg if vol_avg > 0 else 1
-        return_5d = data["Close"].pct_change(5).iloc[-1]
+        vol_ratio = vol / vol_avg if vol_avg > 0 else 1
+        return_5d = close.pct_change(5).iloc[-1]
 
-        obv_ma10 = float(latest["OBV_MA10"])
-        obv_ratio = float(latest["OBV"]) / abs(obv_ma10) if abs(obv_ma10) > 0 else 1
+        obv_ma = float(latest["OBV_MA10"])
+        obv_ratio = float(latest["OBV"]) / abs(obv_ma) if abs(obv_ma) > 0 else 1
 
         features = pd.DataFrame([{
             "MA20": ma20,
@@ -133,22 +124,23 @@ def analyze_stock(symbol, model, period):
             "MACD_Hist": macd,
             "BB_pband": bb_pband,
             "ATR_ratio": atr_ratio,
-            "Volume_ratio": volume_ratio,
+            "Volume_ratio": vol_ratio,
             "Return": float(latest["Return"]),
             "Return_5d": return_5d,
             "OBV_ratio": obv_ratio
         }])
 
+        # ML
         pred = model.predict(features.values)[0]
         prob = model.predict_proba(features.values)[0].max()
         direction = "UP" if pred == 1 else "DOWN"
 
         # ========================
-        # PRO SCORE (BALANCED ✅)
+        # SCORING
         # ========================
         score = 0
 
-        # ML weighting
+        # ML confidence
         if prob > 0.75:
             score += 2 if direction == "UP" else -2
         elif prob > 0.6:
@@ -173,28 +165,25 @@ def analyze_stock(symbol, model, period):
             score -= 2
 
         # Bollinger
-        if price <= bb_lower:
+        if price <= bbl:
             score += 1
-        elif price >= bb_upper:
+        elif price >= bbu:
             score -= 1
 
         # Volume
-        if volume_ratio > 1.5:
+        if vol_ratio > 1.5:
             score += 1 if direction == "UP" else -1
 
         score = max(-10, min(10, score))
 
-        # Recommendation
-        if score >= 4: rec = "BUY"
-        elif score <= -4: rec = "SELL"
-        else: rec = "HOLD"
+        if abs(score) < SCORE_THRESHOLD:
+            return None
 
         return {
             "stock": symbol,
             "price": round(price, 2),
             "score": score,
-            "rec": rec,
-            "rsi": round(rsi, 2),
+            "rec": "BUY" if score > 0 else "SELL",
             "conf": round(prob * 100),
             "target": round(price + atr * 2, 2),
             "sl": round(price - atr, 2),
@@ -207,18 +196,14 @@ def analyze_stock(symbol, model, period):
 # ========================
 # TELEGRAM
 # ========================
-def send_telegram(msg):
-    users_file = os.path.join(BASE_DIR, "users.json")
-    try:
-        users = json.load(open(users_file))
-    except:
-        users = []
+def send(msg):
+    users = json.load(open("users.json")) if os.path.exists("users.json") else []
 
-    for uid in users:
+    for u in users:
         try:
             requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": uid, "text": msg},
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                json={"chat_id": u, "text": msg},
                 timeout=10
             )
         except:
@@ -235,16 +220,16 @@ def main():
 
     model = load_model()
     if not model:
-        send_telegram("⚠️ Model missing")
+        send("⚠️ Model missing")
         return
 
     buys, sells = [], []
 
-    for s in SCANNER_STOCKS:
-        res = analyze_stock(s, model, SCAN_PERIOD)
+    for s in STOCKS:
+        res = analyze(s, model)
         time.sleep(1)
 
-        if res and abs(res["score"]) >= SCORE_THRESHOLD:
+        if res:
             log.info(f"{s} → {res['score']} {res['rec']}")
 
             if res["score"] > 0:
@@ -252,7 +237,7 @@ def main():
             else:
                 sells.append(res)
 
-    msg = "📊 *Stock Alert*\n\n"
+    msg = "📊 *AI Stock Alert*\n\n"
 
     if buys:
         msg += "🟢 BUY:\n"
@@ -264,8 +249,7 @@ def main():
         for s in sells:
             msg += f"{s['stock']} ₹{s['price']} ({s['score']})\n"
 
-    send_telegram(msg)
-
+    send(msg)
     log.info("Done")
 
 # ========================
